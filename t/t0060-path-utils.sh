@@ -9,20 +9,27 @@ test_description='Test various path utilities'
 
 norm_path() {
 	expected=$(test-tool path-utils print_path "$2")
-	test_expect_success $3 "normalize path: $1 => $2" \
-	"test \"\$(test-tool path-utils normalize_path_copy '$1')\" = '$expected'"
+	test_expect_success $3 "normalize path: $1 => $2" "
+		echo '$expected' >expect &&
+		test-tool path-utils normalize_path_copy '$1' >actual &&
+		test_cmp expect actual
+	"
 }
 
 relative_path() {
 	expected=$(test-tool path-utils print_path "$3")
-	test_expect_success $4 "relative path: $1 $2 => $3" \
-	"test \"\$(test-tool path-utils relative_path '$1' '$2')\" = '$expected'"
+	test_expect_success $4 "relative path: $1 $2 => $3" "
+		echo '$expected' >expect &&
+		test-tool path-utils relative_path '$1' '$2' >actual &&
+		test_cmp expect actual
+	"
 }
 
 test_submodule_relative_url() {
 	test_expect_success "test_submodule_relative_url: $1 $2 $3 => $4" "
-		actual=\$(git submodule--helper resolve-relative-url-test '$1' '$2' '$3') &&
-		test \"\$actual\" = '$4'
+		echo '$4' >expect &&
+		test-tool submodule resolve-relative-url '$1' '$2' '$3' >actual &&
+		test_cmp expect actual
 	"
 }
 
@@ -55,14 +62,19 @@ fi
 ancestor() {
 	# We do some math with the expected ancestor length.
 	expected=$3
-	if test -n "$rootoff" && test "x$expected" != x-1; then
-		expected=$(($expected-$rootslash))
-		test $expected -lt 0 ||
-		expected=$(($expected+$rootoff))
-	fi
-	test_expect_success "longest ancestor: $1 $2 => $expected" \
-	"actual=\$(test-tool path-utils longest_ancestor_length '$1' '$2') &&
-	 test \"\$actual\" = '$expected'"
+	case "$rootoff,$expected,$2" in
+	*,*,//*) ;; # leave UNC paths alone
+	[0-9]*,[0-9]*,/*)
+		# On Windows, expect MSYS2 pseudo root translation for
+		# Unix-style absolute paths
+		expected=$(($expected-$rootslash+$rootoff))
+		;;
+	esac
+	test_expect_success $4 "longest ancestor: $1 $2 => $expected" "
+		echo '$expected' >expect &&
+		test-tool path-utils longest_ancestor_length '$1' '$2' >actual &&
+		test_cmp expect actual
+	"
 }
 
 # Some absolute path tests should be skipped on Windows due to path mangling
@@ -156,13 +168,29 @@ ancestor /foo/bar /foo 4
 ancestor /foo/bar /foo:/bar 4
 ancestor /foo/bar /bar -1
 
+# Windows-specific: DOS drives, network shares
+ancestor C:/Users/me C:/ 2 MINGW
+ancestor D:/Users/me C:/ -1 MINGW
+ancestor //server/share/my-directory //server/share/ 14 MINGW
+
 test_expect_success 'strip_path_suffix' '
-	test c:/msysgit = $(test-tool path-utils strip_path_suffix \
-		c:/msysgit/libexec//git-core libexec/git-core)
+	echo c:/msysgit >expect &&
+	test-tool path-utils strip_path_suffix \
+		c:/msysgit/libexec//git-core libexec/git-core >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'absolute path rejects the empty string' '
 	test_must_fail test-tool path-utils absolute_path ""
+'
+
+test_expect_success MINGW '<drive-letter>:\\abc is an absolute path' '
+	for letter in : \" C Z 1 ä
+	do
+		path=$letter:\\abc &&
+		absolute="$(test-tool path-utils absolute_path "$path")" &&
+		test "$path" = "$absolute" || return 1
+	done
 '
 
 test_expect_success 'real path rejects the empty string' '
@@ -170,35 +198,61 @@ test_expect_success 'real path rejects the empty string' '
 '
 
 test_expect_success POSIX 'real path works on absolute paths 1' '
+	echo / >expect &&
+	test-tool path-utils real_path "/" >actual &&
+	test_cmp expect actual &&
+
 	nopath="hopefully-absent-path" &&
-	test "/" = "$(test-tool path-utils real_path "/")" &&
-	test "/$nopath" = "$(test-tool path-utils real_path "/$nopath")"
+	echo "/$nopath" >expect &&
+	test-tool path-utils real_path "/$nopath" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'real path works on absolute paths 2' '
-	nopath="hopefully-absent-path" &&
 	# Find an existing top-level directory for the remaining tests:
 	d=$(pwd -P | sed -e "s|^\([^/]*/[^/]*\)/.*|\1|") &&
-	test "$d" = "$(test-tool path-utils real_path "$d")" &&
-	test "$d/$nopath" = "$(test-tool path-utils real_path "$d/$nopath")"
+	echo "$d" >expect &&
+	test-tool path-utils real_path "$d" >actual &&
+	test_cmp expect actual &&
+
+	nopath="hopefully-absent-path" &&
+	echo "$d/$nopath" >expect &&
+	test-tool path-utils real_path "$d/$nopath" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success POSIX 'real path removes extra leading slashes' '
+	echo "/" >expect &&
+	test-tool path-utils real_path "///" >actual &&
+	test_cmp expect actual &&
+
 	nopath="hopefully-absent-path" &&
-	test "/" = "$(test-tool path-utils real_path "///")" &&
-	test "/$nopath" = "$(test-tool path-utils real_path "///$nopath")" &&
+	echo "/$nopath" >expect &&
+	test-tool path-utils real_path "///$nopath" >actual &&
+	test_cmp expect actual &&
+
 	# Find an existing top-level directory for the remaining tests:
 	d=$(pwd -P | sed -e "s|^\([^/]*/[^/]*\)/.*|\1|") &&
-	test "$d" = "$(test-tool path-utils real_path "//$d")" &&
-	test "$d/$nopath" = "$(test-tool path-utils real_path "//$d/$nopath")"
+	echo "$d" >expect &&
+	test-tool path-utils real_path "//$d" >actual &&
+	test_cmp expect actual &&
+
+	echo "$d/$nopath" >expect &&
+	test-tool path-utils real_path "//$d/$nopath" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'real path removes other extra slashes' '
-	nopath="hopefully-absent-path" &&
 	# Find an existing top-level directory for the remaining tests:
 	d=$(pwd -P | sed -e "s|^\([^/]*/[^/]*\)/.*|\1|") &&
-	test "$d" = "$(test-tool path-utils real_path "$d///")" &&
-	test "$d/$nopath" = "$(test-tool path-utils real_path "$d///$nopath")"
+	echo "$d" >expect &&
+	test-tool path-utils real_path "$d///" >actual &&
+	test_cmp expect actual &&
+
+	nopath="hopefully-absent-path" &&
+	echo "$d/$nopath" >expect &&
+	test-tool path-utils real_path "$d///$nopath" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success SYMLINKS 'real path works on symlinks' '
@@ -207,21 +261,31 @@ test_expect_success SYMLINKS 'real path works on symlinks' '
 	mkdir second &&
 	ln -s ../first second/other &&
 	mkdir third &&
-	dir="$(cd .git; pwd -P)" &&
+	dir="$(cd .git && pwd -P)" &&
 	dir2=third/../second/other/.git &&
-	test "$dir" = "$(test-tool path-utils real_path $dir2)" &&
+	echo "$dir" >expect &&
+	test-tool path-utils real_path $dir2 >actual &&
+	test_cmp expect actual &&
 	file="$dir"/index &&
-	test "$file" = "$(test-tool path-utils real_path $dir2/index)" &&
+	echo "$file" >expect &&
+	test-tool path-utils real_path $dir2/index >actual &&
+	test_cmp expect actual &&
 	basename=blub &&
-	test "$dir/$basename" = "$(cd .git && test-tool path-utils real_path "$basename")" &&
+	echo "$dir/$basename" >expect &&
+	test-tool -C .git path-utils real_path "$basename" >actual &&
+	test_cmp expect actual &&
 	ln -s ../first/file .git/syml &&
-	sym="$(cd first; pwd -P)"/file &&
-	test "$sym" = "$(test-tool path-utils real_path "$dir2/syml")"
+	sym="$(cd first && pwd -P)"/file &&
+	echo "$sym" >expect &&
+	test-tool path-utils real_path "$dir2/syml" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success SYMLINKS 'prefix_path works with absolute paths to work tree symlinks' '
 	ln -s target symlink &&
-	test "$(test-tool path-utils prefix_path prefix "$(pwd)/symlink")" = "symlink"
+	echo "symlink" >expect &&
+	test-tool path-utils prefix_path prefix "$(pwd)/symlink" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'prefix_path works with only absolute path to work tree' '
@@ -237,7 +301,10 @@ test_expect_success 'prefix_path rejects absolute path to dir with same beginnin
 test_expect_success SYMLINKS 'prefix_path works with absolute path to a symlink to work tree having  same beginning as work tree' '
 	git init repo &&
 	ln -s repo repolink &&
-	test "a" = "$(cd repo && test-tool path-utils prefix_path prefix "$(pwd)/../repolink/a")"
+	echo "a" >expect &&
+	repo_path="$(cd repo && pwd)" &&
+	test-tool -C repo path-utils prefix_path prefix "$repo_path/../repolink/a" >actual &&
+	test_cmp expect actual
 '
 
 relative_path /foo/a/b/c/	/foo/a/b/	c/
@@ -285,9 +352,13 @@ test_git_path GIT_OBJECT_DIRECTORY=foo objects/foo foo/foo
 test_git_path GIT_OBJECT_DIRECTORY=foo objects2 .git/objects2
 test_expect_success 'setup common repository' 'git --git-dir=bar init'
 test_git_path GIT_COMMON_DIR=bar index                    .git/index
+test_git_path GIT_COMMON_DIR=bar index.lock               .git/index.lock
 test_git_path GIT_COMMON_DIR=bar HEAD                     .git/HEAD
 test_git_path GIT_COMMON_DIR=bar logs/HEAD                .git/logs/HEAD
+test_git_path GIT_COMMON_DIR=bar logs/HEAD.lock           .git/logs/HEAD.lock
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisect/foo     .git/logs/refs/bisect/foo
+test_git_path GIT_COMMON_DIR=bar logs/refs                bar/logs/refs
+test_git_path GIT_COMMON_DIR=bar logs/refs/               bar/logs/refs/
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisec/foo      bar/logs/refs/bisec/foo
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisec          bar/logs/refs/bisec
 test_git_path GIT_COMMON_DIR=bar logs/refs/bisectfoo      bar/logs/refs/bisectfoo
@@ -299,13 +370,15 @@ test_git_path GIT_COMMON_DIR=bar info/sparse-checkout     .git/info/sparse-check
 test_git_path GIT_COMMON_DIR=bar info//sparse-checkout    .git/info//sparse-checkout
 test_git_path GIT_COMMON_DIR=bar remotes/bar              bar/remotes/bar
 test_git_path GIT_COMMON_DIR=bar branches/bar             bar/branches/bar
-test_git_path GIT_COMMON_DIR=bar logs/refs/heads/master   bar/logs/refs/heads/master
-test_git_path GIT_COMMON_DIR=bar refs/heads/master        bar/refs/heads/master
+test_git_path GIT_COMMON_DIR=bar logs/refs/heads/main     bar/logs/refs/heads/main
+test_git_path GIT_COMMON_DIR=bar refs/heads/main          bar/refs/heads/main
 test_git_path GIT_COMMON_DIR=bar refs/bisect/foo          .git/refs/bisect/foo
 test_git_path GIT_COMMON_DIR=bar hooks/me                 bar/hooks/me
 test_git_path GIT_COMMON_DIR=bar config                   bar/config
 test_git_path GIT_COMMON_DIR=bar packed-refs              bar/packed-refs
 test_git_path GIT_COMMON_DIR=bar shallow                  bar/shallow
+test_git_path GIT_COMMON_DIR=bar common                   bar/common
+test_git_path GIT_COMMON_DIR=bar common/file              bar/common/file
 
 # In the tests below, $(pwd) must be used because it is a native path on
 # Windows and avoids MSYS's path mangling (which simplifies "foo/../bar" and
@@ -421,6 +494,9 @@ test_expect_success 'match .gitmodules' '
 		~1000000 \
 		~9999999 \
 		\
+		.gitmodules:\$DATA \
+		"gitmod~4 . :\$DATA" \
+		\
 		--not \
 		".gitmodules x"  \
 		".gitmodules .x" \
@@ -445,7 +521,125 @@ test_expect_success 'match .gitmodules' '
 		\
 		GI7EB~1 \
 		GI7EB~01 \
-		GI7EB~1X
+		GI7EB~1X \
+		\
+		.gitmodules,:\$DATA
+'
+
+test_expect_success 'match .gitattributes' '
+	test-tool path-utils is_dotgitattributes \
+		.gitattributes \
+		.git${u200c}attributes \
+		.Gitattributes \
+		.gitattributeS \
+		GITATT~1 \
+		GI7D29~1
+'
+
+test_expect_success 'match .gitignore' '
+	test-tool path-utils is_dotgitignore \
+		.gitignore \
+		.git${u200c}ignore \
+		.Gitignore \
+		.gitignorE \
+		GITIGN~1 \
+		GI250A~1
+'
+
+test_expect_success 'match .mailmap' '
+	test-tool path-utils is_dotmailmap \
+		.mailmap \
+		.mail${u200c}map \
+		.Mailmap \
+		.mailmaP \
+		MAILMA~1 \
+		MABA30~1
+'
+
+test_expect_success MINGW 'is_valid_path() on Windows' '
+	test-tool path-utils is_valid_path \
+		win32 \
+		"win32 x" \
+		../hello.txt \
+		C:\\git \
+		comm \
+		conout.c \
+		com0.c \
+		lptN \
+		\
+		--not \
+		"win32 "  \
+		"win32 /x "  \
+		"win32."  \
+		"win32 . ." \
+		.../hello.txt \
+		colon:test \
+		"AUX.c" \
+		"abc/conOut\$  .xyz/test" \
+		lpt8 \
+		com9.c \
+		"lpt*" \
+		Nul \
+		"PRN./abc"
+'
+
+test_lazy_prereq RUNTIME_PREFIX '
+	test true = "$RUNTIME_PREFIX"
+'
+
+test_lazy_prereq CAN_EXEC_IN_PWD '
+	cp "$GIT_EXEC_PATH"/git$X ./ &&
+	./git rev-parse
+'
+
+test_expect_success !VALGRIND,RUNTIME_PREFIX,CAN_EXEC_IN_PWD 'setup runtime prefix' '
+	mkdir -p pretend/bin &&
+	cp "$GIT_EXEC_PATH"/git$X pretend/bin/
+'
+
+test_expect_success !VALGRIND,RUNTIME_PREFIX,CAN_EXEC_IN_PWD 'RUNTIME_PREFIX works' '
+	mkdir -p pretend/libexec/git-core &&
+	echo "echo HERE" | write_script pretend/libexec/git-core/git-here &&
+	GIT_EXEC_PATH= ./pretend/bin/git here >actual &&
+	echo HERE >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success !VALGRIND,RUNTIME_PREFIX,CAN_EXEC_IN_PWD '%(prefix)/ works' '
+	git config yes.path "%(prefix)/yes" &&
+	GIT_EXEC_PATH= ./pretend/bin/git config --path yes.path >actual &&
+	echo "$(pwd)/pretend/yes" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success MINGW,RUNTIME_PREFIX 'MSYSTEM/PATH is adjusted if necessary' '
+	if test -z "$MINGW_PREFIX"
+	then
+		MINGW_PREFIX="/$(echo "${MSYSTEM:-MINGW64}" | tr A-Z a-z)"
+	fi &&
+	mkdir -p "$HOME"/bin pretend"$MINGW_PREFIX"/bin \
+		pretend"$MINGW_PREFIX"/libexec/git-core pretend/usr/bin &&
+	cp "$GIT_EXEC_PATH"/git.exe pretend"$MINGW_PREFIX"/bin/ &&
+	cp "$GIT_EXEC_PATH"/git.exe pretend"$MINGW_PREFIX"/libexec/git-core/ &&
+	# copy the .dll files, if any (happens when building via CMake)
+	if test -n "$(ls "$GIT_EXEC_PATH"/*.dll 2>/dev/null)"
+	then
+		cp "$GIT_EXEC_PATH"/*.dll pretend"$MINGW_PREFIX"/bin/ &&
+		cp "$GIT_EXEC_PATH"/*.dll pretend"$MINGW_PREFIX"/libexec/git-core/
+	fi &&
+	echo "env | grep MSYSTEM=" | write_script "$HOME"/bin/git-test-home &&
+	echo "echo ${MINGW_PREFIX#/}" | write_script pretend"$MINGW_PREFIX"/bin/git-test-bin &&
+	echo "echo usr" | write_script pretend/usr/bin/git-test-bin2 &&
+
+	(
+		MSYSTEM= &&
+		GIT_EXEC_PATH= &&
+		pretend"$MINGW_PREFIX"/libexec/git-core/git.exe test-home >actual &&
+		pretend"$MINGW_PREFIX"/libexec/git-core/git.exe test-bin >>actual &&
+		pretend"$MINGW_PREFIX"/bin/git.exe test-bin2 >>actual
+	) &&
+	test_write_lines MSYSTEM=$MSYSTEM "${MINGW_PREFIX#/}" usr >expect &&
+	test_cmp expect actual
 '
 
 test_done

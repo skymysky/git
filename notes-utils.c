@@ -1,14 +1,21 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
 #include "config.h"
 #include "commit.h"
+#include "environment.h"
+#include "gettext.h"
 #include "refs.h"
 #include "notes-utils.h"
-#include "repository.h"
+#include "strbuf.h"
 
-void create_notes_commit(struct notes_tree *t, struct commit_list *parents,
+void create_notes_commit(struct repository *r,
+			 struct notes_tree *t,
+			 const struct commit_list *parents,
 			 const char *msg, size_t msg_len,
 			 struct object_id *result_oid)
 {
+	struct commit_list *parents_to_free = NULL;
 	struct object_id tree_oid;
 
 	assert(t->initialized);
@@ -19,12 +26,12 @@ void create_notes_commit(struct notes_tree *t, struct commit_list *parents,
 	if (!parents) {
 		/* Deduce parent commit from t->ref */
 		struct object_id parent_oid;
-		if (!read_ref(t->ref, &parent_oid)) {
-			struct commit *parent = lookup_commit(the_repository,
-							      &parent_oid);
-			if (parse_commit(parent))
+		if (!refs_read_ref(get_main_ref_store(the_repository), t->ref, &parent_oid)) {
+			struct commit *parent = lookup_commit(r, &parent_oid);
+			if (repo_parse_commit(r, parent))
 				die("Failed to find/parse commit %s", t->ref);
-			commit_list_insert(parent, &parents);
+			commit_list_insert(parent, &parents_to_free);
+			parents = parents_to_free;
 		}
 		/* else: t->ref points to nothing, assume root/orphan commit */
 	}
@@ -32,9 +39,11 @@ void create_notes_commit(struct notes_tree *t, struct commit_list *parents,
 	if (commit_tree(msg, msg_len, &tree_oid, parents, result_oid, NULL,
 			NULL))
 		die("Failed to commit notes tree to database");
+
+	commit_list_free(parents_to_free);
 }
 
-void commit_notes(struct notes_tree *t, const char *msg)
+void commit_notes(struct repository *r, struct notes_tree *t, const char *msg)
 {
 	struct strbuf buf = STRBUF_INIT;
 	struct object_id commit_oid;
@@ -50,10 +59,11 @@ void commit_notes(struct notes_tree *t, const char *msg)
 	strbuf_addstr(&buf, msg);
 	strbuf_complete_line(&buf);
 
-	create_notes_commit(t, NULL, buf.buf, buf.len, &commit_oid);
-	strbuf_insert(&buf, 0, "notes: ", 7); /* commit message starts at index 7 */
-	update_ref(buf.buf, t->update_ref, &commit_oid, NULL, 0,
-		   UPDATE_REFS_DIE_ON_ERR);
+	create_notes_commit(r, t, NULL, buf.buf, buf.len, &commit_oid);
+	strbuf_insertstr(&buf, 0, "notes: ");
+	refs_update_ref(get_main_ref_store(the_repository), buf.buf,
+			t->update_ref, &commit_oid, NULL, 0,
+			UPDATE_REFS_DIE_ON_ERR);
 
 	strbuf_release(&buf);
 }
@@ -90,7 +100,9 @@ static combine_notes_fn parse_combine_notes_fn(const char *v)
 		return NULL;
 }
 
-static int notes_rewrite_config(const char *k, const char *v, void *cb)
+static int notes_rewrite_config(const char *k, const char *v,
+				const struct config_context *ctx UNUSED,
+				void *cb)
 {
 	struct notes_rewrite_cfg *c = cb;
 	if (starts_with(k, "notes.rewrite.") && !strcmp(k+14, c->cmd)) {
@@ -106,6 +118,8 @@ static int notes_rewrite_config(const char *k, const char *v, void *cb)
 		}
 		return 0;
 	} else if (!c->refs_from_env && !strcmp(k, "notes.rewriteref")) {
+		if (!v)
+			return config_error_nonbool(k);
 		/* note that a refs/ prefix is implied in the
 		 * underlying for_each_glob_ref */
 		if (starts_with(v, "refs/notes/"))
@@ -128,7 +142,7 @@ struct notes_rewrite_cfg *init_copy_notes_for_rewrite(const char *cmd)
 	c->cmd = cmd;
 	c->enabled = 1;
 	c->combine = combine_notes_concatenate;
-	c->refs = xcalloc(1, sizeof(struct string_list));
+	CALLOC_ARRAY(c->refs, 1);
 	c->refs->strdup_strings = 1;
 	c->refs_from_env = 0;
 	c->mode_from_env = 0;
@@ -148,7 +162,7 @@ struct notes_rewrite_cfg *init_copy_notes_for_rewrite(const char *cmd)
 		c->refs_from_env = 1;
 		string_list_add_refs_from_colon_sep(c->refs, rewrite_refs_env);
 	}
-	git_config(notes_rewrite_config, c);
+	repo_config(the_repository, notes_rewrite_config, c);
 	if (!c->enabled || !c->refs->nr) {
 		string_list_clear(c->refs, 0);
 		free(c->refs);
@@ -171,12 +185,15 @@ int copy_note_for_rewrite(struct notes_rewrite_cfg *c,
 	return ret;
 }
 
-void finish_copy_notes_for_rewrite(struct notes_rewrite_cfg *c, const char *msg)
+void finish_copy_notes_for_rewrite(struct repository *r,
+				   struct notes_rewrite_cfg *c,
+				   const char *msg)
 {
 	int i;
 	for (i = 0; c->trees[i]; i++) {
-		commit_notes(c->trees[i], msg);
+		commit_notes(r, c->trees[i], msg);
 		free_notes(c->trees[i]);
+		free(c->trees[i]);
 	}
 	free(c->trees);
 	free(c);

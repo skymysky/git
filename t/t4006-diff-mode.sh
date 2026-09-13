@@ -6,6 +6,7 @@
 test_description='Test mode change diffs.
 
 '
+
 . ./test-lib.sh
 
 sed_script='s/\(:100644 100755\) \('"$OID_REGEX"'\) \2 /\1 X X /'
@@ -26,34 +27,41 @@ test_expect_success 'chmod' '
 '
 
 test_expect_success 'prepare binary file' '
-	git commit -m rezrov &&
-	printf "\00\01\02\03\04\05\06" >binbin &&
-	git add binbin &&
-	git commit -m binbin
+	git commit -m one &&
+	test_commit --printf two binbin "\00\01\02\03\04\05\06"
 '
 
-# test_expect_success '--stat output after text chmod' '
-# 	test_chmod -x rezrov &&
-# 	echo " 0 files changed" >expect &&
-# 	git diff HEAD --stat >actual &&
-#	test_i18ncmp expect actual
-# '
-#
-# test_expect_success '--shortstat output after text chmod' '
-# 	git diff HEAD --shortstat >actual &&
-# 	test_i18ncmp expect actual
-# '
-#
-# test_expect_success '--stat output after binary chmod' '
-# 	test_chmod +x binbin &&
-# 	echo " 0 files changed" >expect &&
-# 	git diff HEAD --stat >actual &&
-# 	test_i18ncmp expect actual
-# '
-#
-# test_expect_success '--shortstat output after binary chmod' '
-# 	git diff HEAD --shortstat >actual &&
-# 	test_i18ncmp expect actual
-# '
+test_expect_success '--stat output after text chmod' '
+	test_chmod -x rezrov &&
+	cat >expect <<-\EOF &&
+	 rezrov | 0
+	 1 file changed, 0 insertions(+), 0 deletions(-)
+	EOF
+	git diff HEAD --stat >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--shortstat output after text chmod' '
+	tail -n 1 <expect >expect.short &&
+	git diff HEAD --shortstat >actual &&
+	test_cmp expect.short actual
+'
+
+test_expect_success '--stat output after binary chmod' '
+	test_chmod +x binbin &&
+	cat >expect <<-EOF &&
+	 binbin | Bin
+	 rezrov |   0
+	 2 files changed, 0 insertions(+), 0 deletions(-)
+	EOF
+	git diff HEAD --stat >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--shortstat output after binary chmod' '
+	tail -n 1 <expect >expect.short &&
+	git diff HEAD --shortstat >actual &&
+	test_cmp expect.short actual
+'
 
 test_done

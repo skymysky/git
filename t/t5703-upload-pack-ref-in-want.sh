@@ -9,33 +9,67 @@ get_actual_refs () {
 		/wanted-refs/d
 		/0001/d
 		p
-		}' <out | test-pkt-line unpack >actual_refs
+		}' <out | test-tool pkt-line unpack >actual_refs
 }
 
 get_actual_commits () {
-	sed -n -e '/packfile/,/0000/{
-		/packfile/d
-		p
-		}' <out | test-pkt-line unpack-sideband >o.pack &&
+	test-tool pkt-line unpack-sideband <out >o.pack &&
 	git index-pack o.pack &&
-	git verify-pack -v o.idx | grep commit | cut -c-40 | sort >actual_commits
+	git verify-pack -v o.idx >objs &&
+	sed -n -e 's/\([0-9a-f][0-9a-f]*\) commit .*/\1/p' objs >objs.sed &&
+	sort >actual_commits <objs.sed
 }
 
 check_output () {
 	get_actual_refs &&
 	test_cmp expected_refs actual_refs &&
 	get_actual_commits &&
-	test_cmp expected_commits actual_commits
+	sort expected_commits >sorted_commits &&
+	test_cmp sorted_commits actual_commits
+}
+
+write_command () {
+	echo "command=$1"
+
+	if test "$(test_oid algo)" != sha1
+	then
+		echo "object-format=$(test_oid algo)"
+	fi
+}
+
+# Write a complete fetch command to stdout, suitable for use with `test-tool
+# pkt-line`. "want-ref", "want", and "have" lines are read from stdin.
+#
+# Examples:
+#
+# write_fetch_command <<-EOF
+# want-ref refs/heads/main
+# have $(git rev-parse a)
+# EOF
+#
+# write_fetch_command <<-EOF
+# want $(git rev-parse b)
+# have $(git rev-parse a)
+# EOF
+#
+write_fetch_command () {
+	write_command fetch &&
+	echo "0001" &&
+	echo "no-progress" &&
+	cat &&
+	echo "done" &&
+	echo "0000"
 }
 
 # c(o/foo) d(o/bar)
 #        \ /
-#         b   e(baz)  f(master)
+#         b   e(baz)  f(main)
 #          \__  |  __/
 #             \ | /
 #               a
 test_expect_success 'setup repository' '
 	test_commit a &&
+	git branch -M main &&
 	git checkout -b o/foo &&
 	test_commit b &&
 	test_commit c &&
@@ -43,221 +77,104 @@ test_expect_success 'setup repository' '
 	test_commit d &&
 	git checkout -b baz a &&
 	test_commit e &&
-	git checkout master &&
+	git checkout main &&
 	test_commit f
 '
 
 test_expect_success 'config controls ref-in-want advertisement' '
-	git serve --advertise-capabilities >out &&
-	! grep -a ref-in-want out &&
+	test-tool serve-v2 --advertise-capabilities >out &&
+	test_grep ! "ref-in-want" out &&
 
 	git config uploadpack.allowRefInWant false &&
-	git serve --advertise-capabilities >out &&
-	! grep -a ref-in-want out &&
+	test-tool serve-v2 --advertise-capabilities >out &&
+	test_grep ! "ref-in-want" out &&
 
 	git config uploadpack.allowRefInWant true &&
-	git serve --advertise-capabilities >out &&
-	grep -a ref-in-want out
+	test-tool serve-v2 --advertise-capabilities >out &&
+	test_grep "ref-in-want" out
 '
 
 test_expect_success 'invalid want-ref line' '
-	test-pkt-line pack >in <<-EOF &&
-	command=fetch
-	0001
-	no-progress
+	write_fetch_command >pkt <<-EOF &&
 	want-ref refs/heads/non-existent
-	done
-	0000
 	EOF
 
-	test_must_fail git serve --stateless-rpc 2>out <in &&
-	grep "unknown ref" out
+	test-tool pkt-line pack <pkt >in &&
+	test_must_fail test-tool serve-v2 --stateless-rpc 2>out <in &&
+	test_grep "unknown ref" out
 '
 
 test_expect_success 'basic want-ref' '
+	oid=$(git rev-parse f) &&
 	cat >expected_refs <<-EOF &&
-	$(git rev-parse f) refs/heads/master
+	$oid refs/heads/main
 	EOF
-	git rev-parse f | sort >expected_commits &&
+	git rev-parse f >expected_commits &&
 
-	test-pkt-line pack >in <<-EOF &&
-	command=fetch
-	0001
-	no-progress
-	want-ref refs/heads/master
+	write_fetch_command >pkt <<-EOF &&
+	want-ref refs/heads/main
 	have $(git rev-parse a)
-	done
-	0000
 	EOF
+	test-tool pkt-line pack <pkt >in &&
 
-	git serve --stateless-rpc >out <in &&
+	test-tool serve-v2 --stateless-rpc >out <in &&
 	check_output
 '
 
 test_expect_success 'multiple want-ref lines' '
+	oid_c=$(git rev-parse c) &&
+	oid_d=$(git rev-parse d) &&
 	cat >expected_refs <<-EOF &&
-	$(git rev-parse c) refs/heads/o/foo
-	$(git rev-parse d) refs/heads/o/bar
+	$oid_c refs/heads/o/foo
+	$oid_d refs/heads/o/bar
 	EOF
-	git rev-parse c d | sort >expected_commits &&
+	git rev-parse c d >expected_commits &&
 
-	test-pkt-line pack >in <<-EOF &&
-	command=fetch
-	0001
-	no-progress
+	write_fetch_command >pkt <<-EOF &&
 	want-ref refs/heads/o/foo
 	want-ref refs/heads/o/bar
 	have $(git rev-parse b)
-	done
-	0000
 	EOF
+	test-tool pkt-line pack <pkt >in &&
 
-	git serve --stateless-rpc >out <in &&
+	test-tool serve-v2 --stateless-rpc >out <in &&
 	check_output
 '
 
 test_expect_success 'mix want and want-ref' '
+	oid=$(git rev-parse f) &&
 	cat >expected_refs <<-EOF &&
-	$(git rev-parse f) refs/heads/master
+	$oid refs/heads/main
 	EOF
-	git rev-parse e f | sort >expected_commits &&
+	git rev-parse e f >expected_commits &&
 
-	test-pkt-line pack >in <<-EOF &&
-	command=fetch
-	0001
-	no-progress
-	want-ref refs/heads/master
+	write_fetch_command >pkt <<-EOF &&
+	want-ref refs/heads/main
 	want $(git rev-parse e)
 	have $(git rev-parse a)
-	done
-	0000
 	EOF
+	test-tool pkt-line pack <pkt >in &&
 
-	git serve --stateless-rpc >out <in &&
+	test-tool serve-v2 --stateless-rpc >out <in &&
 	check_output
 '
 
 test_expect_success 'want-ref with ref we already have commit for' '
+	oid=$(git rev-parse c) &&
 	cat >expected_refs <<-EOF &&
-	$(git rev-parse c) refs/heads/o/foo
+	$oid refs/heads/o/foo
 	EOF
 	>expected_commits &&
 
-	test-pkt-line pack >in <<-EOF &&
-	command=fetch
-	0001
-	no-progress
+	write_fetch_command >pkt <<-EOF &&
 	want-ref refs/heads/o/foo
 	have $(git rev-parse c)
-	done
-	0000
 	EOF
+	test-tool pkt-line pack <pkt >in &&
 
-	git serve --stateless-rpc >out <in &&
+	test-tool serve-v2 --stateless-rpc >out <in &&
 	check_output
 '
-
-. "$TEST_DIRECTORY"/lib-httpd.sh
-start_httpd
-
-REPO="$HTTPD_DOCUMENT_ROOT_PATH/repo"
-LOCAL_PRISTINE="$(pwd)/local_pristine"
-
-test_expect_success 'setup repos for change-while-negotiating test' '
-	(
-		git init "$REPO" &&
-		cd "$REPO" &&
-		>.git/git-daemon-export-ok &&
-		test_commit m1 &&
-		git tag -d m1 &&
-
-		# Local repo with many commits (so that negotiation will take
-		# more than 1 request/response pair)
-		git clone "http://127.0.0.1:$LIB_HTTPD_PORT/smart/repo" "$LOCAL_PRISTINE" &&
-		cd "$LOCAL_PRISTINE" &&
-		git checkout -b side &&
-		for i in $(test_seq 1 33); do test_commit s$i; done &&
-
-		# Add novel commits to upstream
-		git checkout master &&
-		cd "$REPO" &&
-		test_commit m2 &&
-		test_commit m3 &&
-		git tag -d m2 m3
-	) &&
-	git -C "$LOCAL_PRISTINE" remote set-url origin "http://127.0.0.1:$LIB_HTTPD_PORT/one_time_sed/repo" &&
-	git -C "$LOCAL_PRISTINE" config protocol.version 2
-'
-
-inconsistency () {
-	# Simulate that the server initially reports $2 as the ref
-	# corresponding to $1, and after that, $1 as the ref corresponding to
-	# $1. This corresponds to the real-life situation where the server's
-	# repository appears to change during negotiation, for example, when
-	# different servers in a load-balancing arrangement serve (stateless)
-	# RPCs during a single negotiation.
-	printf "s/%s/%s/" \
-	       $(git -C "$REPO" rev-parse $1 | tr -d "\n") \
-	       $(git -C "$REPO" rev-parse $2 | tr -d "\n") \
-	       >"$HTTPD_ROOT_PATH/one-time-sed"
-}
-
-test_expect_success 'server is initially ahead - no ref in want' '
-	git -C "$REPO" config uploadpack.allowRefInWant false &&
-	rm -rf local &&
-	cp -r "$LOCAL_PRISTINE" local &&
-	inconsistency master 1234567890123456789012345678901234567890 &&
-	test_must_fail git -C local fetch 2>err &&
-	grep "ERR upload-pack: not our ref" err
-'
-
-test_expect_success 'server is initially ahead - ref in want' '
-	git -C "$REPO" config uploadpack.allowRefInWant true &&
-	rm -rf local &&
-	cp -r "$LOCAL_PRISTINE" local &&
-	inconsistency master 1234567890123456789012345678901234567890 &&
-	git -C local fetch &&
-
-	git -C "$REPO" rev-parse --verify master >expected &&
-	git -C local rev-parse --verify refs/remotes/origin/master >actual &&
-	test_cmp expected actual
-'
-
-test_expect_success 'server is initially behind - no ref in want' '
-	git -C "$REPO" config uploadpack.allowRefInWant false &&
-	rm -rf local &&
-	cp -r "$LOCAL_PRISTINE" local &&
-	inconsistency master "master^" &&
-	git -C local fetch &&
-
-	git -C "$REPO" rev-parse --verify "master^" >expected &&
-	git -C local rev-parse --verify refs/remotes/origin/master >actual &&
-	test_cmp expected actual
-'
-
-test_expect_success 'server is initially behind - ref in want' '
-	git -C "$REPO" config uploadpack.allowRefInWant true &&
-	rm -rf local &&
-	cp -r "$LOCAL_PRISTINE" local &&
-	inconsistency master "master^" &&
-	git -C local fetch &&
-
-	git -C "$REPO" rev-parse --verify "master" >expected &&
-	git -C local rev-parse --verify refs/remotes/origin/master >actual &&
-	test_cmp expected actual
-'
-
-test_expect_success 'server loses a ref - ref in want' '
-	git -C "$REPO" config uploadpack.allowRefInWant true &&
-	rm -rf local &&
-	cp -r "$LOCAL_PRISTINE" local &&
-	echo "s/master/raster/" >"$HTTPD_ROOT_PATH/one-time-sed" &&
-	test_must_fail git -C local fetch 2>err &&
-
-	grep "ERR unknown ref refs/heads/raster" err
-'
-
-stop_httpd
 
 REPO="$(pwd)/repo"
 LOCAL_PRISTINE="$(pwd)/local_pristine"
@@ -265,7 +182,7 @@ LOCAL_PRISTINE="$(pwd)/local_pristine"
 # $REPO
 # c(o/foo) d(o/bar)
 #        \ /
-#         b   e(baz)  f(master)
+#         b   e(baz)  f(main)
 #          \__  |  __/
 #             \ | /
 #               a
@@ -276,10 +193,10 @@ LOCAL_PRISTINE="$(pwd)/local_pristine"
 #		.
 #		.
 #		|
-#		a(master)
+#		a(main)
 test_expect_success 'setup repos for fetching with ref-in-want tests' '
 	(
-		git init "$REPO" &&
+		git init -b main "$REPO" &&
 		cd "$REPO" &&
 		test_commit a &&
 
@@ -289,10 +206,10 @@ test_expect_success 'setup repos for fetching with ref-in-want tests' '
 		git clone "file://$REPO" "$LOCAL_PRISTINE" &&
 		cd "$LOCAL_PRISTINE" &&
 		git checkout -b side &&
-		for i in $(test_seq 1 33); do test_commit s$i; done &&
+		test_commit_bulk --id=s 33 &&
 
 		# Add novel commits to upstream
-		git checkout master &&
+		git checkout main &&
 		cd "$REPO" &&
 		git checkout -b o/foo &&
 		test_commit b &&
@@ -301,7 +218,7 @@ test_expect_success 'setup repos for fetching with ref-in-want tests' '
 		test_commit d &&
 		git checkout -b baz a &&
 		test_commit e &&
-		git checkout master &&
+		git checkout main &&
 		test_commit f
 	) &&
 	git -C "$REPO" config uploadpack.allowRefInWant true &&
@@ -309,17 +226,20 @@ test_expect_success 'setup repos for fetching with ref-in-want tests' '
 '
 
 test_expect_success 'fetching with exact OID' '
-	test_when_finished "rm -f log" &&
+	test_when_finished "rm -f log trace2" &&
 
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
-	GIT_TRACE_PACKET="$(pwd)/log" git -C local fetch origin \
-		$(git -C "$REPO" rev-parse d):refs/heads/actual &&
+	oid=$(git -C "$REPO" rev-parse d) &&
+	GIT_TRACE_PACKET="$(pwd)/log" GIT_TRACE2_EVENT="$(pwd)/trace2" \
+		git -C local fetch origin \
+		"$oid":refs/heads/actual &&
 
+	test_grep \"key\":\"total_rounds\",\"value\":\"2\" trace2 &&
 	git -C "$REPO" rev-parse "d" >expected &&
 	git -C local rev-parse refs/heads/actual >actual &&
 	test_cmp expected actual &&
-	grep "want $(git -C "$REPO" rev-parse d)" log
+	test_grep "want $oid" log
 '
 
 test_expect_success 'fetching multiple refs' '
@@ -327,13 +247,13 @@ test_expect_success 'fetching multiple refs' '
 
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
-	GIT_TRACE_PACKET="$(pwd)/log" git -C local fetch origin master baz &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -C local fetch origin main baz &&
 
-	git -C "$REPO" rev-parse "master" "baz" >expected &&
-	git -C local rev-parse refs/remotes/origin/master refs/remotes/origin/baz >actual &&
+	git -C "$REPO" rev-parse "main" "baz" >expected &&
+	git -C local rev-parse refs/remotes/origin/main refs/remotes/origin/baz >actual &&
 	test_cmp expected actual &&
-	grep "want-ref refs/heads/master" log &&
-	grep "want-ref refs/heads/baz" log
+	test_grep "want-ref refs/heads/main" log &&
+	test_grep "want-ref refs/heads/baz" log
 '
 
 test_expect_success 'fetching ref and exact OID' '
@@ -341,14 +261,15 @@ test_expect_success 'fetching ref and exact OID' '
 
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
+	oid=$(git -C "$REPO" rev-parse b) &&
 	GIT_TRACE_PACKET="$(pwd)/log" git -C local fetch origin \
-		master $(git -C "$REPO" rev-parse b):refs/heads/actual &&
+		main "$oid":refs/heads/actual &&
 
-	git -C "$REPO" rev-parse "master" "b" >expected &&
-	git -C local rev-parse refs/remotes/origin/master refs/heads/actual >actual &&
+	git -C "$REPO" rev-parse "main" "b" >expected &&
+	git -C local rev-parse refs/remotes/origin/main refs/heads/actual >actual &&
 	test_cmp expected actual &&
-	grep "want $(git -C "$REPO" rev-parse b)" log &&
-	grep "want-ref refs/heads/master" log
+	test_grep "want $oid" log &&
+	test_grep "want-ref refs/heads/main" log
 '
 
 test_expect_success 'fetching with wildcard that does not match any refs' '
@@ -370,8 +291,250 @@ test_expect_success 'fetching with wildcard that matches multiple refs' '
 	git -C "$REPO" rev-parse "o/foo" "o/bar" >expected &&
 	git -C local rev-parse "o/foo" "o/bar" >actual &&
 	test_cmp expected actual &&
-	grep "want-ref refs/heads/o/foo" log &&
-	grep "want-ref refs/heads/o/bar" log
+	test_grep "want-ref refs/heads/o/foo" log &&
+	test_grep "want-ref refs/heads/o/bar" log
 '
+
+REPO="$(pwd)/repo-ns"
+
+test_expect_success 'setup namespaced repo' '
+	(
+		git init -b main "$REPO" &&
+		cd "$REPO" &&
+		test_commit a &&
+		test_commit b &&
+		git checkout a &&
+		test_commit c &&
+		git checkout a &&
+		test_commit d &&
+		git update-ref refs/heads/ns-no b &&
+		git update-ref refs/namespaces/ns/refs/heads/ns-yes c &&
+		git update-ref refs/namespaces/ns/refs/heads/hidden d
+	) &&
+	git -C "$REPO" config uploadpack.allowRefInWant true
+'
+
+test_expect_success 'with namespace: want-ref is considered relative to namespace' '
+	wanted_ref=refs/heads/ns-yes &&
+
+	oid=$(git -C "$REPO" rev-parse "refs/namespaces/ns/$wanted_ref") &&
+	cat >expected_refs <<-EOF &&
+	$oid $wanted_ref
+	EOF
+	cat >expected_commits <<-EOF &&
+	$oid
+	$(git -C "$REPO" rev-parse a)
+	EOF
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	GIT_NAMESPACE=ns test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	check_output
+'
+
+test_expect_success 'with namespace: want-ref outside namespace is unknown' '
+	wanted_ref=refs/heads/ns-no &&
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	test_must_fail env GIT_NAMESPACE=ns \
+		test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	test_grep "unknown ref" out
+'
+
+# Cross-check refs/heads/ns-no indeed exists
+test_expect_success 'without namespace: want-ref outside namespace succeeds' '
+	wanted_ref=refs/heads/ns-no &&
+
+	oid=$(git -C "$REPO" rev-parse $wanted_ref) &&
+	cat >expected_refs <<-EOF &&
+	$oid $wanted_ref
+	EOF
+	cat >expected_commits <<-EOF &&
+	$oid
+	$(git -C "$REPO" rev-parse a)
+	EOF
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	check_output
+'
+
+test_expect_success 'with namespace: hideRefs is matched, relative to namespace' '
+	wanted_ref=refs/heads/hidden &&
+	git -C "$REPO" config transfer.hideRefs $wanted_ref &&
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	test_must_fail env GIT_NAMESPACE=ns \
+		test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	test_grep "unknown ref" out
+'
+
+# Cross-check refs/heads/hidden indeed exists
+test_expect_success 'with namespace: want-ref succeeds if hideRefs is removed' '
+	wanted_ref=refs/heads/hidden &&
+	git -C "$REPO" config --unset transfer.hideRefs $wanted_ref &&
+
+	oid=$(git -C "$REPO" rev-parse "refs/namespaces/ns/$wanted_ref") &&
+	cat >expected_refs <<-EOF &&
+	$oid $wanted_ref
+	EOF
+	cat >expected_commits <<-EOF &&
+	$oid
+	$(git -C "$REPO" rev-parse a)
+	EOF
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	GIT_NAMESPACE=ns test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	check_output
+'
+
+test_expect_success 'without namespace: relative hideRefs does not match' '
+	wanted_ref=refs/namespaces/ns/refs/heads/hidden &&
+	git -C "$REPO" config transfer.hideRefs refs/heads/hidden &&
+
+	oid=$(git -C "$REPO" rev-parse $wanted_ref) &&
+	cat >expected_refs <<-EOF &&
+	$oid $wanted_ref
+	EOF
+	cat >expected_commits <<-EOF &&
+	$oid
+	$(git -C "$REPO" rev-parse a)
+	EOF
+
+	write_fetch_command >pkt <<-EOF &&
+	want-ref $wanted_ref
+	EOF
+	test-tool pkt-line pack <pkt >in &&
+
+	test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
+	check_output
+'
+
+
+. "$TEST_DIRECTORY"/lib-httpd.sh
+start_httpd
+
+REPO="$HTTPD_DOCUMENT_ROOT_PATH/repo"
+LOCAL_PRISTINE="$(pwd)/local_pristine"
+
+test_expect_success 'setup repos for change-while-negotiating test' '
+	(
+		git init -b main "$REPO" &&
+		cd "$REPO" &&
+		>.git/git-daemon-export-ok &&
+		test_commit m1 &&
+		git tag -d m1 &&
+
+		# Local repo with many commits (so that negotiation will take
+		# more than 1 request/response pair)
+		rm -rf "$LOCAL_PRISTINE" &&
+		git clone "http://127.0.0.1:$LIB_HTTPD_PORT/smart/repo" "$LOCAL_PRISTINE" &&
+		cd "$LOCAL_PRISTINE" &&
+		git checkout -b side &&
+		test_commit_bulk --id=s 33 &&
+
+		# Add novel commits to upstream
+		git checkout main &&
+		cd "$REPO" &&
+		test_commit m2 &&
+		test_commit m3 &&
+		git tag -d m2 m3
+	) &&
+	git -C "$LOCAL_PRISTINE" remote set-url origin "http://127.0.0.1:$LIB_HTTPD_PORT/one_time_script/repo" &&
+	git -C "$LOCAL_PRISTINE" config protocol.version 2
+'
+
+inconsistency () {
+	# Simulate that the server initially reports $2 as the ref
+	# corresponding to $1, and after that, $1 as the ref corresponding to
+	# $1. This corresponds to the real-life situation where the server's
+	# repository appears to change during negotiation, for example, when
+	# different servers in a load-balancing arrangement serve (stateless)
+	# RPCs during a single negotiation.
+	oid1=$(git -C "$REPO" rev-parse $1) &&
+	oid2=$(git -C "$REPO" rev-parse $2) &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-EOF
+	sed "s/$oid1/$oid2/" "\$1"
+	EOF
+}
+
+test_expect_success PERL_TEST_HELPERS 'server is initially ahead - no ref in want' '
+	git -C "$REPO" config uploadpack.allowRefInWant false &&
+	rm -rf local &&
+	cp -r "$LOCAL_PRISTINE" local &&
+	inconsistency main $(test_oid numeric) &&
+	test_must_fail git -C local fetch 2>err &&
+	test_grep "fatal: remote error: upload-pack: not our ref" err
+'
+
+test_expect_success PERL_TEST_HELPERS 'server is initially ahead - ref in want' '
+	git -C "$REPO" config uploadpack.allowRefInWant true &&
+	rm -rf local &&
+	cp -r "$LOCAL_PRISTINE" local &&
+	inconsistency main $(test_oid numeric) &&
+	git -C local fetch &&
+
+	git -C "$REPO" rev-parse --verify main >expected &&
+	git -C local rev-parse --verify refs/remotes/origin/main >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success PERL_TEST_HELPERS 'server is initially behind - no ref in want' '
+	git -C "$REPO" config uploadpack.allowRefInWant false &&
+	rm -rf local &&
+	cp -r "$LOCAL_PRISTINE" local &&
+	inconsistency main "main^" &&
+	git -C local fetch &&
+
+	git -C "$REPO" rev-parse --verify "main^" >expected &&
+	git -C local rev-parse --verify refs/remotes/origin/main >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success PERL_TEST_HELPERS 'server is initially behind - ref in want' '
+	git -C "$REPO" config uploadpack.allowRefInWant true &&
+	rm -rf local &&
+	cp -r "$LOCAL_PRISTINE" local &&
+	inconsistency main "main^" &&
+	git -C local fetch &&
+
+	git -C "$REPO" rev-parse --verify "main" >expected &&
+	git -C local rev-parse --verify refs/remotes/origin/main >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success PERL_TEST_HELPERS 'server loses a ref - ref in want' '
+	git -C "$REPO" config uploadpack.allowRefInWant true &&
+	rm -rf local &&
+	cp -r "$LOCAL_PRISTINE" local &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-\EOF &&
+	sed "s/main/rain/" "$1"
+	EOF
+	test_must_fail git -C local fetch 2>err &&
+
+	test_grep "fatal: remote error: unknown ref refs/heads/rain" err
+'
+
+# DO NOT add non-httpd-specific tests here, because the last part of this
+# test script is only executed when httpd is available and enabled.
 
 test_done

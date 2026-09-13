@@ -1,11 +1,26 @@
-#include "cache.h"
+#include "git-compat-util.h"
+#include "hex-ll.h"
+#include "strbuf.h"
 #include "url.h"
+
+int is_rfc3986_unreserved(char ch)
+{
+	return isalnum(ch) ||
+		ch == '-' || ch == '_' || ch == '.' || ch == '~';
+}
+
+int is_casefolding_rfc3986_unreserved(char c)
+{
+	return (c >= 'a' && c <= 'z') ||
+	       (c >= '0' && c <= '9') ||
+	       c == '-' || c == '.' || c == '_' || c == '~';
+}
 
 int is_urlschemechar(int first_flag, int ch)
 {
 	/*
 	 * The set of valid URL schemes, as per STD66 (RFC3986) is
-	 * '[A-Za-z][A-Za-z0-9+.-]*'. But use sightly looser check
+	 * '[A-Za-z][A-Za-z0-9+.-]*'. But use slightly looser check
 	 * of '[A-Za-z0-9][A-Za-z0-9+.-]*' because earlier version
 	 * of check used '[A-Za-z0-9]+' so not to break any remote
 	 * helpers.
@@ -46,9 +61,9 @@ static char *url_decode_internal(const char **query, int len,
 			break;
 		}
 
-		if (c == '%') {
+		if (c == '%' && (len < 0 || len >= 3)) {
 			int val = hex2chr(q + 1);
-			if (0 <= val) {
+			if (0 < val) {
 				strbuf_addch(out, val);
 				q += 3;
 				len -= 3;
@@ -86,6 +101,12 @@ char *url_decode_mem(const char *url, int len)
 	return url_decode_internal(&url, len, NULL, &out, 0);
 }
 
+char *url_percent_decode(const char *encoded)
+{
+	struct strbuf out = STRBUF_INIT;
+	return url_decode_internal(&encoded, strlen(encoded), NULL, &out, 0);
+}
+
 char *url_decode_parameter_name(const char **query)
 {
 	struct strbuf out = STRBUF_INIT;
@@ -104,9 +125,33 @@ void end_url_with_slash(struct strbuf *buf, const char *url)
 	strbuf_complete(buf, '/');
 }
 
-void str_end_url_with_slash(const char *url, char **dest) {
+void str_end_url_with_slash(const char *url, char **dest)
+{
 	struct strbuf buf = STRBUF_INIT;
 	end_url_with_slash(&buf, url);
 	free(*dest);
 	*dest = strbuf_detach(&buf, NULL);
+}
+
+int url_is_local_not_ssh(const char *url)
+{
+	const char *colon = strchr(url, ':');
+	const char *slash = strchr(url, '/');
+	return !colon || (slash && slash < colon) ||
+		(has_dos_drive_prefix(url) && is_valid_path(url));
+}
+
+enum url_scheme url_get_scheme(const char *name)
+{
+	if (!strcmp(name, "ssh"))
+		return URL_SCHEME_SSH;
+	if (!strcmp(name, "git"))
+		return URL_SCHEME_GIT;
+	if (!strcmp(name, "git+ssh")) /* deprecated - do not use */
+		return URL_SCHEME_SSH;
+	if (!strcmp(name, "ssh+git")) /* deprecated - do not use */
+		return URL_SCHEME_SSH;
+	if (!strcmp(name, "file"))
+		return URL_SCHEME_FILE;
+	return URL_SCHEME_UNKNOWN;
 }

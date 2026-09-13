@@ -3,14 +3,14 @@
 # Perform various static code analysis checks
 #
 
-. ${0%/*}/lib-travisci.sh
+. ${0%/*}/lib.sh
 
-make --jobs=2 coccicheck
+make coccicheck
 
 set +x
 
 fail=
-for cocci_patch in contrib/coccinelle/*.patch
+for cocci_patch in tools/coccinelle/*.patch
 do
 	if test -s "$cocci_patch"
 	then
@@ -25,5 +25,12 @@ then
 	echo "$(tput setaf 1)error: Coccinelle suggested some changes$(tput sgr0)"
 	exit 1
 fi
+
+make check-headers ||
+exit 1
+
+make check-pot
+
+${0%/*}/check-unsafe-assertions.sh
 
 save_good_tree

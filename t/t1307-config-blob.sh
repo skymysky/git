@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='support for reading config from a blob'
+
 . ./test-lib.sh
 
 test_expect_success 'create config blob' '
@@ -61,20 +62,18 @@ test_expect_success 'parse errors in blobs are properly attributed' '
 	git commit -m broken &&
 
 	test_must_fail git config --blob=HEAD:config some.value 2>err &&
-	test_i18ngrep "HEAD:config" err
+	test_grep "HEAD:config" err
 '
 
 test_expect_success 'can parse blob ending with CR' '
-	printf "[some]key = value\\r" >config &&
-	git add config &&
-	git commit -m CR &&
+	test_commit --printf CR config "[some]key = value\\r" &&
 	echo value >expect &&
 	git config --blob=HEAD:config some.key >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'config --blob outside of a repository is an error' '
-	test_must_fail nongit git config --blob=foo --list
+	nongit test_must_fail git config --blob=foo --list
 '
 
 test_done

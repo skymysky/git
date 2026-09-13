@@ -1,8 +1,15 @@
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "strbuf.h"
 #include "utf8.h"
 
-/* This code is originally from http://www.cl.cam.ac.uk/~mgk25/ucs/ */
+/* This code is originally from https://www.cl.cam.ac.uk/~mgk25/ucs/ */
+
+static const char utf16_be_bom[] = {'\xFE', '\xFF'};
+static const char utf16_le_bom[] = {'\xFF', '\xFE'};
+static const char utf32_be_bom[] = {'\0', '\0', '\xFE', '\xFF'};
+static const char utf32_le_bom[] = {'\xFF', '\xFE', '\0', '\0'};
 
 struct interval {
 	ucs_char_t first;
@@ -90,13 +97,11 @@ static int git_wcwidth(ucs_char_t ch)
 		return -1;
 
 	/* binary search in table of non-spacing characters */
-	if (bisearch(ch, zero_width, sizeof(zero_width)
-				/ sizeof(struct interval) - 1))
+	if (bisearch(ch, zero_width, ARRAY_SIZE(zero_width) - 1))
 		return 0;
 
 	/* binary search in table of double width characters */
-	if (bisearch(ch, double_width, sizeof(double_width)
-				/ sizeof(struct interval) - 1))
+	if (bisearch(ch, double_width, ARRAY_SIZE(double_width) - 1))
 		return 2;
 
 	return 1;
@@ -203,26 +208,34 @@ int utf8_width(const char **start, size_t *remainder_p)
  * string, assuming that the string is utf8.  Returns strlen() instead
  * if the string does not look like a valid utf8 string.
  */
-int utf8_strnwidth(const char *string, int len, int skip_ansi)
+int utf8_strnwidth(const char *string, size_t len, int skip_ansi)
 {
-	int width = 0;
 	const char *orig = string;
+	size_t width = 0;
 
-	if (len == -1)
-		len = strlen(string);
 	while (string && string < orig + len) {
-		int skip;
+		int glyph_width;
+		size_t skip;
+
 		while (skip_ansi &&
 		       (skip = display_mode_esc_sequence_len(string)) != 0)
 			string += skip;
-		width += utf8_width(&string, NULL);
+
+		glyph_width = utf8_width(&string, NULL);
+		if (glyph_width > 0)
+			width += glyph_width;
 	}
-	return string ? width : len;
+
+	/*
+	 * TODO: fix the interface of this function and `utf8_strwidth()` to
+	 * return `size_t` instead of `int`.
+	 */
+	return cast_size_t_to_int(string ? width : len);
 }
 
 int utf8_strwidth(const char *string)
 {
-	return utf8_strnwidth(string, -1, 0);
+	return utf8_strnwidth(string, strlen(string), 0);
 }
 
 int is_utf8(const char *text)
@@ -354,51 +367,52 @@ void strbuf_add_wrapped_bytes(struct strbuf *buf, const char *data, int len,
 void strbuf_utf8_replace(struct strbuf *sb_src, int pos, int width,
 			 const char *subst)
 {
-	struct strbuf sb_dst = STRBUF_INIT;
-	char *src = sb_src->buf;
-	char *end = src + sb_src->len;
-	char *dst;
-	int w = 0, subst_len = 0;
+	const char *src = sb_src->buf, *end = sb_src->buf + sb_src->len;
+	struct strbuf dst;
+	int w = 0;
 
-	if (subst)
-		subst_len = strlen(subst);
-	strbuf_grow(&sb_dst, sb_src->len + subst_len);
-	dst = sb_dst.buf;
+	strbuf_init(&dst, sb_src->len);
 
 	while (src < end) {
-		char *old;
+		const char *old;
+		int glyph_width;
 		size_t n;
 
 		while ((n = display_mode_esc_sequence_len(src))) {
-			memcpy(dst, src, n);
+			strbuf_add(&dst, src, n);
 			src += n;
-			dst += n;
 		}
 
 		if (src >= end)
 			break;
 
 		old = src;
-		n = utf8_width((const char**)&src, NULL);
-		if (!src) 	/* broken utf-8, do nothing */
+		glyph_width = utf8_width((const char**)&src, NULL);
+		if (!src) /* broken utf-8, do nothing */
 			goto out;
-		if (n && w >= pos && w < pos + width) {
+
+		/*
+		 * In case we see a control character we copy it into the
+		 * buffer, but don't add it to the width.
+		 */
+		if (glyph_width < 0)
+			glyph_width = 0;
+
+		if (glyph_width && w >= pos && w < pos + width) {
 			if (subst) {
-				memcpy(dst, subst, subst_len);
-				dst += subst_len;
+				strbuf_addstr(&dst, subst);
 				subst = NULL;
 			}
-			w += n;
-			continue;
+		} else {
+			strbuf_add(&dst, old, src - old);
 		}
-		memcpy(dst, old, src - old);
-		dst += src - old;
-		w += n;
+
+		w += glyph_width;
 	}
-	strbuf_setlen(&sb_dst, dst - sb_dst.buf);
-	strbuf_swap(sb_src, &sb_dst);
+
+	strbuf_swap(sb_src, &dst);
 out:
-	strbuf_release(&sb_dst);
+	strbuf_release(&dst);
 }
 
 /*
@@ -408,11 +422,10 @@ out:
  */
 static int same_utf_encoding(const char *src, const char *dst)
 {
-	if (istarts_with(src, "utf") && istarts_with(dst, "utf")) {
-		/* src[3] or dst[3] might be '\0' */
-		int i = (src[3] == '-' ? 4 : 3);
-		int j = (dst[3] == '-' ? 4 : 3);
-		return !strcasecmp(src+i, dst+j);
+	if (skip_iprefix(src, "utf", &src) && skip_iprefix(dst, "utf", &dst)) {
+		skip_prefix(src, "-", &src);
+		skip_prefix(dst, "-", &dst);
+		return !strcasecmp(src, dst);
 	}
 	return 0;
 }
@@ -470,16 +483,17 @@ int utf8_fprintf(FILE *stream, const char *format, ...)
 #else
 	typedef char * iconv_ibp;
 #endif
-char *reencode_string_iconv(const char *in, size_t insz, iconv_t conv, size_t *outsz_p)
+char *reencode_string_iconv(const char *in, size_t insz, iconv_t conv,
+			    size_t bom_len, size_t *outsz_p)
 {
 	size_t outsz, outalloc;
 	char *out, *outpos;
 	iconv_ibp cp;
 
 	outsz = insz;
-	outalloc = st_add(outsz, 1); /* for terminating NUL */
+	outalloc = st_add(outsz, 1 + bom_len); /* for terminating NUL */
 	out = xmalloc(outalloc);
-	outpos = out;
+	outpos = out + bom_len;
 	cp = (iconv_ibp)in;
 
 	while (1) {
@@ -501,6 +515,19 @@ char *reencode_string_iconv(const char *in, size_t insz, iconv_t conv, size_t *o
 			out = xrealloc(out, outalloc);
 			outpos = out + sofar;
 			outsz = outalloc - sofar - 1;
+#ifdef ICONV_RESTART_RESET
+			/*
+			 * If iconv(3) messes up piecemeal conversions
+			 * then restore the original pointers, sizes,
+			 * and converter state, then retry converting
+			 * the full string using the reallocated buffer.
+			 */
+			insz += cp - (iconv_ibp)in; /* Restore insz */
+			cp = (iconv_ibp)in;         /* original start value */
+			outpos = out + bom_len;     /* original start value */
+			outsz = outalloc - bom_len - 1; /* new len */
+			iconv(conv, NULL, NULL, NULL, NULL); /* reset iconv machinery */
+#endif
 		}
 		else {
 			*outpos = '\0';
@@ -540,9 +567,43 @@ char *reencode_string_len(const char *in, size_t insz,
 {
 	iconv_t conv;
 	char *out;
+	const char *bom_str = NULL;
+	size_t bom_len = 0;
 
 	if (!in_encoding)
 		return NULL;
+
+	/* UTF-16LE-BOM is the same as UTF-16 for reading */
+	if (same_utf_encoding("UTF-16LE-BOM", in_encoding))
+		in_encoding = "UTF-16";
+
+	/*
+	 * For writing, UTF-16 iconv typically creates "UTF-16BE-BOM"
+	 * Some users under Windows want the little endian version
+	 *
+	 * We handle UTF-16 and UTF-32 ourselves only if the platform does not
+	 * provide a BOM (which we require), since we want to match the behavior
+	 * of the system tools and libc as much as possible.
+	 */
+	if (same_utf_encoding("UTF-16LE-BOM", out_encoding)) {
+		bom_str = utf16_le_bom;
+		bom_len = sizeof(utf16_le_bom);
+		out_encoding = "UTF-16LE";
+	} else if (same_utf_encoding("UTF-16BE-BOM", out_encoding)) {
+		bom_str = utf16_be_bom;
+		bom_len = sizeof(utf16_be_bom);
+		out_encoding = "UTF-16BE";
+#ifdef ICONV_OMITS_BOM
+	} else if (same_utf_encoding("UTF-16", out_encoding)) {
+		bom_str = utf16_be_bom;
+		bom_len = sizeof(utf16_be_bom);
+		out_encoding = "UTF-16BE";
+	} else if (same_utf_encoding("UTF-32", out_encoding)) {
+		bom_str = utf32_be_bom;
+		bom_len = sizeof(utf32_be_bom);
+		out_encoding = "UTF-32BE";
+#endif
+	}
 
 	conv = iconv_open(out_encoding, in_encoding);
 	if (conv == (iconv_t) -1) {
@@ -553,9 +614,10 @@ char *reencode_string_len(const char *in, size_t insz,
 		if (conv == (iconv_t) -1)
 			return NULL;
 	}
-
-	out = reencode_string_iconv(in, insz, conv, outsz);
+	out = reencode_string_iconv(in, insz, conv, bom_len, outsz);
 	iconv_close(conv);
+	if (out && bom_str && bom_len)
+		memcpy(out, bom_str, bom_len);
 	return out;
 }
 #endif
@@ -565,11 +627,6 @@ static int has_bom_prefix(const char *data, size_t len,
 {
 	return data && bom && (len >= bom_len) && !memcmp(data, bom, bom_len);
 }
-
-static const char utf16_be_bom[] = {'\xFE', '\xFF'};
-static const char utf16_le_bom[] = {'\xFF', '\xFE'};
-static const char utf32_be_bom[] = {'\0', '\0', '\xFE', '\xFF'};
-static const char utf32_le_bom[] = {'\xFF', '\xFE', '\0', '\0'};
 
 int has_prohibited_utf_bom(const char *enc, const char *data, size_t len)
 {
@@ -744,6 +801,11 @@ int is_hfs_dotgitattributes(const char *path)
 	return is_hfs_dot_str(path, "gitattributes");
 }
 
+int is_hfs_dotmailmap(const char *path)
+{
+	return is_hfs_dot_str(path, "mailmap");
+}
+
 const char utf8_bom[] = "\357\273\277";
 
 int skip_utf8_bom(char **text, size_t len)
@@ -758,7 +820,7 @@ int skip_utf8_bom(char **text, size_t len)
 void strbuf_utf8_align(struct strbuf *buf, align_type position, unsigned int width,
 		       const char *s)
 {
-	int slen = strlen(s);
+	size_t slen = strlen(s);
 	int display_len = utf8_strnwidth(s, slen, 0);
 	int utf8_compensation = slen - display_len;
 

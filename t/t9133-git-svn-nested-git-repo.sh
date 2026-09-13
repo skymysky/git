@@ -11,7 +11,7 @@ test_expect_success 'setup repo with a git repo inside it' '
 	(
 		cd s &&
 		git init &&
-		test -f .git/HEAD &&
+		git symbolic-ref HEAD &&
 		> .git/a &&
 		echo a > a &&
 		svn_cmd add .git a &&
@@ -35,7 +35,7 @@ test_expect_success 'SVN-side change outside of .git' '
 		echo b >> a &&
 		svn_cmd commit -m "SVN-side change outside of .git" &&
 		svn_cmd up &&
-		svn_cmd log -v | fgrep "SVN-side change outside of .git"
+		svn_cmd log -v | grep -F "SVN-side change outside of .git"
 	)
 '
 
@@ -45,7 +45,7 @@ test_expect_success 'update git svn-cloned repo' '
 		git svn rebase &&
 		echo a > expect &&
 		echo b >> expect &&
-		test_cmp a expect &&
+		test_cmp expect a &&
 		rm expect
 	)
 '
@@ -59,7 +59,7 @@ test_expect_success 'SVN-side change inside of .git' '
 		svn_cmd add --force .git &&
 		svn_cmd commit -m "SVN-side change inside of .git" &&
 		svn_cmd up &&
-		svn_cmd log -v | fgrep "SVN-side change inside of .git"
+		svn_cmd log -v | grep -F "SVN-side change inside of .git"
 	)
 '
 
@@ -69,7 +69,7 @@ test_expect_success 'update git svn-cloned repo' '
 		git svn rebase &&
 		echo a > expect &&
 		echo b >> expect &&
-		test_cmp a expect &&
+		test_cmp expect a &&
 		rm expect
 	)
 '
@@ -82,7 +82,7 @@ test_expect_success 'SVN-side change in and out of .git' '
 		git commit -m "add a inside an SVN repo" &&
 		svn_cmd commit -m "SVN-side change in and out of .git" &&
 		svn_cmd up &&
-		svn_cmd log -v | fgrep "SVN-side change in and out of .git"
+		svn_cmd log -v | grep -F "SVN-side change in and out of .git"
 	)
 '
 
@@ -93,7 +93,7 @@ test_expect_success 'update git svn-cloned repo again' '
 		echo a > expect &&
 		echo b >> expect &&
 		echo c >> expect &&
-		test_cmp a expect &&
+		test_cmp expect a &&
 		rm expect
 	)
 '

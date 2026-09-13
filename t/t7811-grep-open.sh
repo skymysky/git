@@ -62,7 +62,7 @@ test_expect_success SIMPLEPAGER 'git grep -O' '
 
 test_expect_success 'git grep -O --cached' '
 	test_must_fail git grep --cached -O GREP_PATTERN >out 2>msg &&
-	test_i18ngrep open-files-in-pager msg
+	test_grep open-files-in-pager msg
 '
 
 test_expect_success 'git grep -O --no-index' '
@@ -113,10 +113,9 @@ test_expect_success 'modified file' '
 	subdir/grep.c
 	unrelated
 	EOF
-	>empty &&
 
+	test_when_finished "git reset --hard" &&
 	echo "enum grep_pat_token" >unrelated &&
-	test_when_finished "git checkout HEAD unrelated" &&
 	GIT_PAGER=./less git grep -F -O "enum grep_pat_token" >out &&
 	test_cmp expect actual &&
 	test_must_be_empty out

@@ -1,4 +1,6 @@
-#include "cache.h"
+#include "git-compat-util.h"
+#include "sha1dc_git.h"
+#include "hex.h"
 
 #ifdef DC_SHA1_EXTERNAL
 /*
@@ -19,16 +21,15 @@ void git_SHA1DCFinal(unsigned char hash[20], SHA1_CTX *ctx)
 	if (!SHA1DCFinal(hash, ctx))
 		return;
 	die("SHA-1 appears to be part of a collision attack: %s",
-	    sha1_to_hex(hash));
+	    hash_to_hex_algop(hash, &hash_algos[GIT_HASH_SHA1]));
 }
 
 /*
  * Same as SHA1DCUpdate, but adjust types to match git's usual interface.
  */
-void git_SHA1DCUpdate(SHA1_CTX *ctx, const void *vdata, unsigned long len)
+void git_SHA1DCUpdate(SHA1_CTX *ctx, const void *vdata, size_t len)
 {
 	const char *data = vdata;
-	/* We expect an unsigned long, but sha1dc only takes an int */
 	while (len > INT_MAX) {
 		SHA1DCUpdate(ctx, data, INT_MAX);
 		data += INT_MAX;

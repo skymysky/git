@@ -1,11 +1,22 @@
-#include "cache.h"
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
+#include "gettext.h"
+#include "hash.h"
+#include "mem-pool.h"
+#include "read-cache-ll.h"
+#include "repository.h"
 #include "split-index.h"
+#include "strbuf.h"
 #include "ewah/ewok.h"
 
 struct split_index *init_split_index(struct index_state *istate)
 {
 	if (!istate->split_index) {
-		istate->split_index = xcalloc(1, sizeof(*istate->split_index));
+		if (istate->sparse_index)
+			die(_("cannot use split index with a sparse index"));
+
+		CALLOC_ARRAY(istate->split_index, 1);
 		istate->split_index->refcount = 1;
 	}
 	return istate->split_index;
@@ -14,16 +25,17 @@ struct split_index *init_split_index(struct index_state *istate)
 int read_link_extension(struct index_state *istate,
 			 const void *data_, unsigned long sz)
 {
+	const struct git_hash_algo *algo = istate->repo->hash_algo;
 	const unsigned char *data = data_;
 	struct split_index *si;
 	int ret;
 
-	if (sz < the_hash_algo->rawsz)
+	if (sz < algo->rawsz)
 		return error("corrupt link extension (too short)");
 	si = init_split_index(istate);
-	hashcpy(si->base_oid.hash, data);
-	data += the_hash_algo->rawsz;
-	sz -= the_hash_algo->rawsz;
+	oidread(&si->base_oid, data, algo);
+	data += algo->rawsz;
+	sz -= algo->rawsz;
 	if (!sz)
 		return 0;
 	si->delete_bitmap = ewah_new();
@@ -45,7 +57,7 @@ int write_link_extension(struct strbuf *sb,
 			 struct index_state *istate)
 {
 	struct split_index *si = istate->split_index;
-	strbuf_add(sb, si->base_oid.hash, the_hash_algo->rawsz);
+	strbuf_add(sb, si->base_oid.hash, istate->repo->hash_algo->rawsz);
 	if (!si->delete_bitmap && !si->replace_bitmap)
 		return 0;
 	ewah_serialize_strbuf(si->delete_bitmap, sb);
@@ -79,13 +91,20 @@ void move_cache_to_base_index(struct index_state *istate)
 	if (si->base &&
 		si->base->ce_mem_pool) {
 
-		if (!istate->ce_mem_pool)
-			mem_pool_init(&istate->ce_mem_pool, 0);
+		if (!istate->ce_mem_pool) {
+			istate->ce_mem_pool = xmalloc(sizeof(struct mem_pool));
+			mem_pool_init(istate->ce_mem_pool, 0);
+		}
 
 		mem_pool_combine(istate->ce_mem_pool, istate->split_index->base->ce_mem_pool);
 	}
 
-	si->base = xcalloc(1, sizeof(*si->base));
+	if (si->base)
+		release_index(si->base);
+	else
+		ALLOC_ARRAY(si->base, 1);
+
+	index_state_init(si->base, istate->repo);
 	si->base->version = istate->version;
 	/* zero timestamp disables racy test in ce_write_index() */
 	si->base->timestamp = istate->timestamp;
@@ -111,7 +130,7 @@ static void mark_entry_for_delete(size_t pos, void *data)
 		die("position for delete %d exceeds base index size %d",
 		    (int)pos, istate->cache_nr);
 	istate->cache[pos]->ce_flags |= CE_REMOVE;
-	istate->split_index->nr_deletions = 1;
+	istate->split_index->nr_deletions++;
 }
 
 static void replace_entry(size_t pos, void *data)
@@ -162,7 +181,7 @@ void merge_base_index(struct index_state *istate)
 	ewah_each_bit(si->replace_bitmap, replace_entry, istate);
 	ewah_each_bit(si->delete_bitmap, mark_entry_for_delete, istate);
 	if (si->nr_deletions)
-		remove_marked_cache_entries(istate);
+		remove_marked_cache_entries(istate, 0);
 
 	for (i = si->nr_replacements; i < si->saved_cache_nr; i++) {
 		if (!ce_namelen(si->saved_cache[i]))
@@ -188,6 +207,31 @@ void merge_base_index(struct index_state *istate)
 	si->saved_cache_nr = 0;
 }
 
+/*
+ * Compare most of the fields in two cache entries, i.e. all except the
+ * hashmap_entry and the name.
+ */
+static int compare_ce_content(struct cache_entry *a, struct cache_entry *b)
+{
+	const unsigned int ondisk_flags = CE_STAGEMASK | CE_VALID |
+					  CE_EXTENDED_FLAGS;
+	unsigned int ce_flags = a->ce_flags;
+	unsigned int base_flags = b->ce_flags;
+	int ret;
+
+	/* only on-disk flags matter */
+	a->ce_flags &= ondisk_flags;
+	b->ce_flags &= ondisk_flags;
+	ret = memcmp(&a->ce_stat_data, &b->ce_stat_data,
+		     offsetof(struct cache_entry, name) -
+		     offsetof(struct cache_entry, oid)) ||
+		!oideq(&a->oid, &b->oid);
+	a->ce_flags = ce_flags;
+	b->ce_flags = base_flags;
+
+	return ret;
+}
+
 void prepare_to_write_split_index(struct index_state *istate)
 {
 	struct split_index *si = init_split_index(istate);
@@ -207,38 +251,109 @@ void prepare_to_write_split_index(struct index_state *istate)
 		 */
 		for (i = 0; i < istate->cache_nr; i++) {
 			struct cache_entry *base;
-			/* namelen is checked separately */
-			const unsigned int ondisk_flags =
-				CE_STAGEMASK | CE_VALID | CE_EXTENDED_FLAGS;
-			unsigned int ce_flags, base_flags, ret;
 			ce = istate->cache[i];
-			if (!ce->index)
+			if (!ce->index) {
+				/*
+				 * During simple update index operations this
+				 * is a cache entry that is not present in
+				 * the shared index.  It will be added to the
+				 * split index.
+				 *
+				 * However, it might also represent a file
+				 * that already has a cache entry in the
+				 * shared index, but a new index has just
+				 * been constructed by unpack_trees(), and
+				 * this entry now refers to different content
+				 * than what was recorded in the original
+				 * index, e.g. during 'read-tree -m HEAD^' or
+				 * 'checkout HEAD^'.  In this case the
+				 * original entry in the shared index will be
+				 * marked as deleted, and this entry will be
+				 * added to the split index.
+				 */
 				continue;
+			}
 			if (ce->index > si->base->cache_nr) {
-				ce->index = 0;
-				continue;
+				BUG("ce refers to a shared ce at %d, which is beyond the shared index size %d",
+				    ce->index, si->base->cache_nr);
 			}
 			ce->ce_flags |= CE_MATCHED; /* or "shared" */
 			base = si->base->cache[ce->index - 1];
-			if (ce == base)
+			if (ce == base) {
+				/* The entry is present in the shared index. */
+				if (ce->ce_flags & CE_UPDATE_IN_BASE) {
+					/*
+					 * Already marked for inclusion in
+					 * the split index, either because
+					 * the corresponding file was
+					 * modified and the cached stat data
+					 * was refreshed, or because there
+					 * is already a replacement entry in
+					 * the split index.
+					 * Nothing more to do here.
+					 */
+				} else if (!ce_uptodate(ce) &&
+					   is_racy_timestamp(istate, ce)) {
+					/*
+					 * A racily clean cache entry stored
+					 * only in the shared index: it must
+					 * be added to the split index, so
+					 * the subsequent do_write_index()
+					 * can smudge its stat data.
+					 */
+					ce->ce_flags |= CE_UPDATE_IN_BASE;
+				} else {
+					/*
+					 * The entry is only present in the
+					 * shared index and it was not
+					 * refreshed.
+					 * Just leave it there.
+					 */
+				}
 				continue;
+			}
 			if (ce->ce_namelen != base->ce_namelen ||
 			    strcmp(ce->name, base->name)) {
 				ce->index = 0;
 				continue;
 			}
-			ce_flags = ce->ce_flags;
-			base_flags = base->ce_flags;
-			/* only on-disk flags matter */
-			ce->ce_flags   &= ondisk_flags;
-			base->ce_flags &= ondisk_flags;
-			ret = memcmp(&ce->ce_stat_data, &base->ce_stat_data,
-				     offsetof(struct cache_entry, name) -
-				     offsetof(struct cache_entry, ce_stat_data));
-			ce->ce_flags = ce_flags;
-			base->ce_flags = base_flags;
-			if (ret)
+			/*
+			 * This is the copy of a cache entry that is present
+			 * in the shared index, created by unpack_trees()
+			 * while it constructed a new index.
+			 */
+			if (ce->ce_flags & CE_UPDATE_IN_BASE) {
+				/*
+				 * Already marked for inclusion in the split
+				 * index, either because the corresponding
+				 * file was modified and the cached stat data
+				 * was refreshed, or because the original
+				 * entry already had a replacement entry in
+				 * the split index.
+				 * Nothing to do.
+				 */
+			} else if (!ce_uptodate(ce) &&
+				   is_racy_timestamp(istate, ce)) {
+				/*
+				 * A copy of a racily clean cache entry from
+				 * the shared index.  It must be added to
+				 * the split index, so the subsequent
+				 * do_write_index() can smudge its stat data.
+				 */
 				ce->ce_flags |= CE_UPDATE_IN_BASE;
+			} else {
+				/*
+				 * Thoroughly compare the cached data to see
+				 * whether it should be marked for inclusion
+				 * in the split index.
+				 *
+				 * This comparison might be unnecessary, as
+				 * code paths modifying the cached data do
+				 * set CE_UPDATE_IN_BASE as well.
+				 */
+				if (compare_ce_content(ce, base))
+					ce->ce_flags |= CE_UPDATE_IN_BASE;
+			}
 			discard_cache_entry(base);
 			si->base->cache[ce->index - 1] = ce;
 		}
@@ -345,24 +460,26 @@ void add_split_index(struct index_state *istate)
 void remove_split_index(struct index_state *istate)
 {
 	if (istate->split_index) {
-		/*
-		 * When removing the split index, we need to move
-		 * ownership of the mem_pool associated with the
-		 * base index to the main index. There may be cache entries
-		 * allocated from the base's memory pool that are shared with
-		 * the_index.cache[].
-		 */
-		mem_pool_combine(istate->ce_mem_pool, istate->split_index->base->ce_mem_pool);
+		if (istate->split_index->base) {
+			/*
+			 * When removing the split index, we need to move
+			 * ownership of the mem_pool associated with the
+			 * base index to the main index. There may be cache entries
+			 * allocated from the base's memory pool that are shared with
+			 * the_index.cache[].
+			 */
+			mem_pool_combine(istate->ce_mem_pool,
+					 istate->split_index->base->ce_mem_pool);
 
-		/*
-		 * The split index no longer owns the mem_pool backing
-		 * its cache array. As we are discarding this index,
-		 * mark the index as having no cache entries, so it
-		 * will not attempt to clean up the cache entries or
-		 * validate them.
-		 */
-		if (istate->split_index->base)
+			/*
+			 * The split index no longer owns the mem_pool backing
+			 * its cache array. As we are discarding this index,
+			 * mark the index as having no cache entries, so it
+			 * will not attempt to clean up the cache entries or
+			 * validate them.
+			 */
 			istate->split_index->base->cache_nr = 0;
+		}
 
 		/*
 		 * We can discard the split index because its

@@ -1,11 +1,15 @@
 #ifndef PACK_OBJECTS_H
 #define PACK_OBJECTS_H
 
-#include "object-store.h"
+#include "odb.h"
 #include "thread-utils.h"
 #include "pack.h"
+#include "packfile.h"
 
-#define DEFAULT_DELTA_CACHE_SIZE (256 * 1024 * 1024)
+struct repository;
+
+#define DEFAULT_DELTA_CACHE_SIZE       (256 * 1024 * 1024)
+#define DEFAULT_DELTA_BASE_CACHE_LIMIT (96 * 1024 * 1024)
 
 #define OE_DFS_STATE_BITS	2
 #define OE_DEPTH_BITS		12
@@ -103,6 +107,7 @@ struct object_entry {
 	unsigned no_try_delta:1;
 	unsigned type_:TYPE_BITS;
 	unsigned in_pack_type:TYPE_BITS; /* could be delta */
+
 	unsigned preferred_base:1; /*
 				    * we do not pack this, but is available
 				    * to be used as the base object to delta
@@ -112,27 +117,31 @@ struct object_entry {
 	unsigned filled:1; /* assigned write-order */
 	unsigned dfs_state:OE_DFS_STATE_BITS;
 	unsigned depth:OE_DEPTH_BITS;
+	unsigned ext_base:1; /* delta_idx points outside packlist */
+};
 
-	/*
-	 * pahole results on 64-bit linux (gcc and clang)
-	 *
-	 *   size: 80, bit_padding: 9 bits
-	 *
-	 * and on 32-bit (gcc)
-	 *
-	 *   size: 76, bit_padding: 9 bits
-	 */
+/**
+ * A packing region is a section of the packing_data.objects array
+ * as given by a starting index and a number of elements.
+ */
+struct packing_region {
+	size_t start;
+	size_t nr;
 };
 
 struct packing_data {
+	struct repository *repo;
 	struct object_entry *objects;
 	uint32_t nr_objects, nr_alloc;
+
+	struct packing_region *regions;
+	size_t nr_regions, nr_regions_alloc;
 
 	int32_t *index;
 	uint32_t index_size;
 
 	unsigned int *in_pack_pos;
-	unsigned long *delta_size;
+	size_t *delta_size;
 
 	/*
 	 * Only one of these can be non-NULL and they have different
@@ -143,36 +152,54 @@ struct packing_data {
 	struct packed_git **in_pack_by_idx;
 	struct packed_git **in_pack;
 
-#ifndef NO_PTHREADS
-	pthread_mutex_t lock;
-#endif
+	/*
+	 * During packing with multiple threads, protect the in-core
+	 * object database from concurrent accesses.
+	 */
+	pthread_mutex_t odb_lock;
+
+	/*
+	 * This list contains entries for bases which we know the other side
+	 * has (e.g., via reachability bitmaps), but which aren't in our
+	 * "objects" list.
+	 */
+	struct object_entry *ext_bases;
+	uint32_t nr_ext, alloc_ext;
 
 	uintmax_t oe_size_limit;
 	uintmax_t oe_delta_size_limit;
+
+	/* delta islands */
+	unsigned int *tree_depth;
+	unsigned char *layer;
+
+	/*
+	 * Used when writing cruft packs.
+	 *
+	 * Object mtimes are stored in pack order when writing, but
+	 * written out in lexicographic (index) order.
+	 */
+	uint32_t *cruft_mtime;
 };
 
-void prepare_packing_data(struct packing_data *pdata);
+void prepare_packing_data(struct repository *r, struct packing_data *pdata);
+void clear_packing_data(struct packing_data *pdata);
 
+/* Protect access to object database */
 static inline void packing_data_lock(struct packing_data *pdata)
 {
-#ifndef NO_PTHREADS
-	pthread_mutex_lock(&pdata->lock);
-#endif
+	pthread_mutex_lock(&pdata->odb_lock);
 }
 static inline void packing_data_unlock(struct packing_data *pdata)
 {
-#ifndef NO_PTHREADS
-	pthread_mutex_unlock(&pdata->lock);
-#endif
+	pthread_mutex_unlock(&pdata->odb_lock);
 }
 
 struct object_entry *packlist_alloc(struct packing_data *pdata,
-				    const unsigned char *sha1,
-				    uint32_t index_pos);
+				    const struct object_id *oid);
 
 struct object_entry *packlist_find(struct packing_data *pdata,
-				   const unsigned char *sha1,
-				   uint32_t *index_pos);
+				   const struct object_id *oid);
 
 static inline uint32_t pack_name_hash(const char *name)
 {
@@ -192,6 +219,34 @@ static inline uint32_t pack_name_hash(const char *name)
 		hash = (hash >> 2) + (c << 24);
 	}
 	return hash;
+}
+
+static inline uint32_t pack_name_hash_v2(const unsigned char *name)
+{
+	uint32_t hash = 0, base = 0, c;
+
+	if (!name)
+		return 0;
+
+	while ((c = *name++)) {
+		if (isspace(c))
+			continue;
+		if (c == '/') {
+			base = (base >> 6) ^ hash;
+			hash = 0;
+		} else {
+			/*
+			 * 'c' is only a single byte. Reverse it and move
+			 * it to the top of the hash, moving the rest to
+			 * less-significant bits.
+			 */
+			c = (c & 0xF0) >> 4 | (c & 0x0F) << 4;
+			c = (c & 0xCC) >> 2 | (c & 0x33) << 2;
+			c = (c & 0xAA) >> 1 | (c & 0x55) << 1;
+			hash = (hash >> 2) + (c << 24);
+		}
+	}
+	return (base >> 6) ^ hash;
 }
 
 static inline enum object_type oe_type(const struct object_entry *e)
@@ -231,157 +286,65 @@ static inline struct packed_git *oe_in_pack(const struct packing_data *pack,
 		return pack->in_pack[e - pack->objects];
 }
 
-void oe_map_new_pack(struct packing_data *pack,
-		     struct packed_git *p);
+void oe_map_new_pack(struct packing_data *pack);
+
 static inline void oe_set_in_pack(struct packing_data *pack,
 				  struct object_entry *e,
 				  struct packed_git *p)
 {
-	if (!p->index)
-		oe_map_new_pack(pack, p);
-	if (pack->in_pack_by_idx)
-		e->in_pack_idx = p->index;
-	else
-		pack->in_pack[e - pack->objects] = p;
+	if (pack->in_pack_by_idx) {
+		if (p->index) {
+			e->in_pack_idx = p->index;
+			return;
+		}
+		/*
+		 * We're accessing packs by index, but this pack doesn't have
+		 * an index (e.g., because it was added since we created the
+		 * in_pack_by_idx array). Bail to oe_map_new_pack(), which
+		 * will convert us to using the full in_pack array, and then
+		 * fall through to our in_pack handling.
+		 */
+		oe_map_new_pack(pack);
+	}
+	pack->in_pack[e - pack->objects] = p;
 }
 
-static inline struct object_entry *oe_delta(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (e->delta_idx)
-		return &pack->objects[e->delta_idx - 1];
-	return NULL;
-}
+void oe_set_delta_ext(struct packing_data *pack,
+		      struct object_entry *e,
+		      const struct object_id *oid);
 
-static inline void oe_set_delta(struct packing_data *pack,
-				struct object_entry *e,
-				struct object_entry *delta)
+static inline unsigned int oe_tree_depth(struct packing_data *pack,
+					 struct object_entry *e)
 {
-	if (delta)
-		e->delta_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_idx = 0;
-}
-
-static inline struct object_entry *oe_delta_child(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (e->delta_child_idx)
-		return &pack->objects[e->delta_child_idx - 1];
-	return NULL;
-}
-
-static inline void oe_set_delta_child(struct packing_data *pack,
-				      struct object_entry *e,
-				      struct object_entry *delta)
-{
-	if (delta)
-		e->delta_child_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_child_idx = 0;
-}
-
-static inline struct object_entry *oe_delta_sibling(
-		const struct packing_data *pack,
-		const struct object_entry *e)
-{
-	if (e->delta_sibling_idx)
-		return &pack->objects[e->delta_sibling_idx - 1];
-	return NULL;
-}
-
-static inline void oe_set_delta_sibling(struct packing_data *pack,
-					struct object_entry *e,
-					struct object_entry *delta)
-{
-	if (delta)
-		e->delta_sibling_idx = (delta - pack->objects) + 1;
-	else
-		e->delta_sibling_idx = 0;
-}
-
-unsigned long oe_get_size_slow(struct packing_data *pack,
-			       const struct object_entry *e);
-static inline unsigned long oe_size(struct packing_data *pack,
-				    const struct object_entry *e)
-{
-	if (e->size_valid)
-		return e->size_;
-
-	return oe_get_size_slow(pack, e);
-}
-
-static inline int oe_size_less_than(struct packing_data *pack,
-				    const struct object_entry *lhs,
-				    unsigned long rhs)
-{
-	if (lhs->size_valid)
-		return lhs->size_ < rhs;
-	if (rhs < pack->oe_size_limit) /* rhs < 2^x <= lhs ? */
+	if (!pack->tree_depth)
 		return 0;
-	return oe_get_size_slow(pack, lhs) < rhs;
+	return pack->tree_depth[e - pack->objects];
 }
 
-static inline int oe_size_greater_than(struct packing_data *pack,
-				       const struct object_entry *lhs,
-				       unsigned long rhs)
+static inline void oe_set_layer(struct packing_data *pack,
+				struct object_entry *e,
+				unsigned char layer)
 {
-	if (lhs->size_valid)
-		return lhs->size_ > rhs;
-	if (rhs < pack->oe_size_limit) /* rhs < 2^x <= lhs ? */
-		return 1;
-	return oe_get_size_slow(pack, lhs) > rhs;
+	if (!pack->layer)
+		CALLOC_ARRAY(pack->layer, pack->nr_alloc);
+	pack->layer[e - pack->objects] = layer;
 }
 
-static inline void oe_set_size(struct packing_data *pack,
-			       struct object_entry *e,
-			       unsigned long size)
+static inline uint32_t oe_cruft_mtime(struct packing_data *pack,
+				      struct object_entry *e)
 {
-	if (size < pack->oe_size_limit) {
-		e->size_ = size;
-		e->size_valid = 1;
-	} else {
-		e->size_valid = 0;
-		if (oe_get_size_slow(pack, e) != size)
-			BUG("'size' is supposed to be the object size!");
-	}
+	if (!pack->cruft_mtime)
+		return 0;
+	return pack->cruft_mtime[e - pack->objects];
 }
 
-static inline unsigned long oe_delta_size(struct packing_data *pack,
-					  const struct object_entry *e)
+static inline void oe_set_cruft_mtime(struct packing_data *pack,
+				      struct object_entry *e,
+				      uint32_t mtime)
 {
-	if (e->delta_size_valid)
-		return e->delta_size_;
-
-	/*
-	 * pack->detla_size[] can't be NULL because oe_set_delta_size()
-	 * must have been called when a new delta is saved with
-	 * oe_set_delta().
-	 * If oe_delta() returns NULL (i.e. default state, which means
-	 * delta_size_valid is also false), then the caller must never
-	 * call oe_delta_size().
-	 */
-	return pack->delta_size[e - pack->objects];
-}
-
-static inline void oe_set_delta_size(struct packing_data *pack,
-				     struct object_entry *e,
-				     unsigned long size)
-{
-	if (size < pack->oe_delta_size_limit) {
-		e->delta_size_ = size;
-		e->delta_size_valid = 1;
-	} else {
-		packing_data_lock(pack);
-		if (!pack->delta_size)
-			ALLOC_ARRAY(pack->delta_size, pack->nr_alloc);
-		packing_data_unlock(pack);
-
-		pack->delta_size[e - pack->objects] = size;
-		e->delta_size_valid = 0;
-	}
+	if (!pack->cruft_mtime)
+		CALLOC_ARRAY(pack->cruft_mtime, pack->nr_alloc);
+	pack->cruft_mtime[e - pack->objects] = mtime;
 }
 
 #endif

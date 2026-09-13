@@ -4,6 +4,7 @@
 struct list_objects_filter_options;
 struct object;
 struct oidset;
+struct repository;
 
 /*
  * During list-object traversal we allow certain objects to be
@@ -23,6 +24,11 @@ struct oidset;
  * _DO_SHOW   : Show this object in the results (call show() on it).
  *              In general, objects should only be shown once, but
  *              this result DOES NOT imply that we mark it SEEN.
+ *
+ * _SKIP_TREE : Used in LOFS_BEGIN_TREE situation - indicates that
+ *              the tree's children should not be iterated over. This
+ *              is used as an optimization when all children will
+ *              definitely be ignored.
  *
  * Most of the time, you want the combination (_MARK_SEEN | _DO_SHOW)
  * but they can be used independently, such as when sparse-checkout
@@ -45,37 +51,63 @@ enum list_objects_filter_result {
 	LOFR_ZERO      = 0,
 	LOFR_MARK_SEEN = 1<<0,
 	LOFR_DO_SHOW   = 1<<1,
+	LOFR_SKIP_TREE = 1<<2,
 };
 
 enum list_objects_filter_situation {
+	LOFS_COMMIT,
+	LOFS_TAG,
 	LOFS_BEGIN_TREE,
 	LOFS_END_TREE,
 	LOFS_BLOB
 };
 
-typedef enum list_objects_filter_result (*filter_object_fn)(
+struct filter;
+
+/*
+ * Constructor for the set of defined list-objects filters.
+ * The `omitted` set is optional. It is populated with objects that the
+ * filter excludes. This set should not be considered finalized until
+ * after list_objects_filter__free is called on the returned `struct
+ * filter *`.
+ */
+struct filter *list_objects_filter__init(
+	struct oidset *omitted,
+	struct list_objects_filter_options *filter_options);
+
+/*
+ * Lets `filter` decide how to handle the `obj`. If `filter` is NULL, this
+ * function behaves as expected if no filter is configured: all objects are
+ * included.
+ */
+enum list_objects_filter_result list_objects_filter__filter_object(
+	struct repository *r,
 	enum list_objects_filter_situation filter_situation,
 	struct object *obj,
 	const char *pathname,
 	const char *filename,
-	void *filter_data);
-
-typedef void (*filter_free_fn)(void *filter_data);
+	struct filter *filter);
 
 /*
- * Constructor for the set of defined list-objects filters.
- * Returns a generic "void *filter_data".
- *
- * The returned "filter_fn" will be used by traverse_commit_list()
- * to filter the results.
- *
- * The returned "filter_free_fn" is a destructor for the
- * filter_data.
+ * Destroys `filter` and finalizes the `omitted` set, if present. Does
+ * nothing if `filter` is null.
  */
-void *list_objects_filter__init(
-	struct oidset *omitted,
-	struct list_objects_filter_options *filter_options,
-	filter_object_fn *filter_fn,
-	filter_free_fn *filter_free_fn);
+void list_objects_filter__free(struct filter *filter);
+
+/*
+ * Given a set of OIDs in 'in', populate 'omitted' with those that
+ * would be filtered by 'opts'. Currently only blob:limit=N is
+ * supported. Objects that cannot be read are silently skipped.
+ *
+ * NEEDSWORK: this reimplements the blob:limit size check rather than
+ * reusing the existing filter machinery. See the matching comment in
+ * list-objects-filter.c.
+ *
+ * Return 0 on success, -1 if the filter is not supported.
+ */
+int list_objects_filter__filter_oidset(struct repository *r,
+	const struct list_objects_filter_options *opts,
+	const struct oidset *in,
+	struct oidset *omitted);
 
 #endif /* LIST_OBJECTS_FILTER_H */

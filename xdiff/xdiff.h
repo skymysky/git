@@ -43,13 +43,14 @@ extern "C" {
 
 #define XDF_PATIENCE_DIFF (1 << 14)
 #define XDF_HISTOGRAM_DIFF (1 << 15)
-#define XDF_DIFF_ALGORITHM_MASK (XDF_PATIENCE_DIFF | XDF_HISTOGRAM_DIFF)
+#define XDF_DIFF_ALGORITHM_MASK (XDF_PATIENCE_DIFF | XDF_HISTOGRAM_DIFF | XDF_NEED_MINIMAL)
 #define XDF_DIFF_ALG(x) ((x) & XDF_DIFF_ALGORITHM_MASK)
 
 #define XDF_INDENT_HEURISTIC (1 << 23)
 
 /* xdemitconf_t.flags */
 #define XDL_EMIT_FUNCNAMES (1 << 0)
+#define XDL_EMIT_NO_HUNK_HDR (1 << 1)
 #define XDL_EMIT_FUNCCONTEXT (1 << 2)
 
 /* merge simplification levels */
@@ -65,6 +66,7 @@ extern "C" {
 
 /* merge output styles */
 #define XDL_MERGE_DIFF3 1
+#define XDL_MERGE_ZEALOUS_DIFF3 2
 
 typedef struct s_mmfile {
 	char *ptr;
@@ -79,14 +81,22 @@ typedef struct s_mmbuffer {
 typedef struct s_xpparam {
 	unsigned long flags;
 
-	/* See Documentation/diff-options.txt. */
+	/* -I<regex> */
+	regex_t **ignore_regex;
+	size_t ignore_regex_nr;
+
+	/* See Documentation/diff-options.adoc. */
 	char **anchors;
 	size_t anchors_nr;
 } xpparam_t;
 
 typedef struct s_xdemitcb {
 	void *priv;
-	int (*outf)(void *, mmbuffer_t *, int);
+	int (*out_hunk)(void *,
+			long old_begin, long old_nr,
+			long new_begin, long new_nr,
+			const char *func, long funclen);
+	int (*out_line)(void *, mmbuffer_t *, int);
 } xdemitcb_t;
 
 typedef long (*find_func_t)(const char *line, long line_len, char *buffer, long buffer_size, void *priv);
@@ -109,9 +119,10 @@ typedef struct s_bdiffparam {
 } bdiffparam_t;
 
 
-#define xdl_malloc(x) malloc(x)
+#define xdl_malloc(x) xmalloc(x)
+#define xdl_calloc(n, sz) xcalloc(n, sz)
 #define xdl_free(ptr) free(ptr)
-#define xdl_realloc(ptr,x) realloc(ptr,x)
+#define xdl_realloc(ptr,x) xrealloc(ptr,x)
 
 void *xdl_mmfile_first(mmfile_t *mmf, long *size);
 long xdl_mmfile_size(mmfile_t *mmf);

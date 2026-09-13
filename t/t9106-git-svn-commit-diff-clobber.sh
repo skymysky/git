@@ -2,6 +2,7 @@
 #
 # Copyright (c) 2006 Eric Wong
 test_description='git svn commit-diff clobber'
+
 . ./lib-git-svn.sh
 
 test_expect_success 'initialize repo' '
@@ -92,7 +93,8 @@ test_expect_success 'multiple dcommit from git svn will not clobber svn' "
 
 
 test_expect_success 'check that rebase really failed' '
-	test -d .git/rebase-apply
+	git status >output &&
+	test_grep currently.rebasing output
 '
 
 test_expect_success 'resolve, continue the rebase and dcommit' "

@@ -1,20 +1,24 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
 
-int cmd_main(int ac, const char **av)
+#include "test-tool.h"
+#include "read-cache-ll.h"
+#include "repository.h"
+#include "setup.h"
+
+int cmd__dump_fsmonitor(int ac UNUSED, const char **av UNUSED)
 {
-	struct index_state *istate = &the_index;
-	int i;
+	struct index_state *istate = the_repository->index;
 
-	setup_git_directory();
-	if (do_read_index(istate, get_index_file(), 0) < 0)
+	setup_git_directory(the_repository);
+	if (do_read_index(istate, the_repository->index_file, 0) < 0)
 		die("unable to read index file");
 	if (!istate->fsmonitor_last_update) {
 		printf("no fsmonitor\n");
 		return 0;
 	}
-	printf("fsmonitor last update %"PRIuMAX"\n", (uintmax_t)istate->fsmonitor_last_update);
+	printf("fsmonitor last update %s\n", istate->fsmonitor_last_update);
 
-	for (i = 0; i < istate->cache_nr; i++)
+	for (size_t i = 0; i < istate->cache_nr; i++)
 		printf((istate->cache[i]->ce_flags & CE_FSMONITOR_VALID) ? "+" : "-");
 
 	return 0;

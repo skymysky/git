@@ -51,7 +51,7 @@ trailing empty lines
 "
 
 test_expect_success setup '
-	git config advice.detachedhead false &&
+	git config set advice.detachedhead false &&
 	echo unrelated >unrelated &&
 	git add unrelated &&
 	test_commit initial foo a &&
@@ -295,6 +295,26 @@ test_expect_success 'cherry-pick preserves commit message' '
 	test_cmp expect actual &&
 	git cherry-pick mesg-unclean &&
 	git log -1 --pretty=format:%B >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'cherry-pick -x cleans commit message' '
+	pristine_detach initial &&
+	git cherry-pick -x mesg-unclean &&
+	git log -1 --pretty=format:%B >actual &&
+	printf "%s\n(cherry picked from commit %s)\n" \
+		"$mesg_unclean" $(git rev-parse mesg-unclean) |
+			git stripspace >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'cherry-pick -x respects commit.cleanup' '
+	pristine_detach initial &&
+	git -c commit.cleanup=strip cherry-pick -x mesg-unclean &&
+	git log -1 --pretty=format:%B >actual &&
+	printf "%s\n(cherry picked from commit %s)\n" \
+		"$mesg_unclean" $(git rev-parse mesg-unclean) |
+			git stripspace -s >expect &&
 	test_cmp expect actual
 '
 

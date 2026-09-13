@@ -8,6 +8,9 @@ test_description='git rebase assorted tests
 This test runs git rebase and checks that the author information is not lost
 among other things.
 '
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 GIT_AUTHOR_NAME=author@name
@@ -15,24 +18,19 @@ GIT_AUTHOR_EMAIL=bogus@email@address
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
 
 test_expect_success 'prepare repository with topic branches' '
-	git config core.logAllRefUpdates true &&
-	echo First >A &&
-	git update-index --add A &&
-	git commit -m "Add A." &&
+	test_commit "Add A." A First First &&
 	git checkout -b force-3way &&
 	echo Dummy >Y &&
 	git update-index --add Y &&
 	git commit -m "Add Y." &&
 	git checkout -b filemove &&
-	git reset --soft master &&
+	git reset --soft main &&
 	mkdir D &&
 	git mv A D/A &&
 	git commit -m "Move A." &&
-	git checkout -b my-topic-branch master &&
-	echo Second >B &&
-	git update-index --add B &&
-	git commit -m "Add B." &&
-	git checkout -f master &&
+	git checkout -b my-topic-branch main &&
+	test_commit "Add B." B Second Second &&
+	git checkout -f main &&
 	echo Third >>A &&
 	git update-index A &&
 	git commit -m "Modify A." &&
@@ -46,17 +44,25 @@ test_expect_success 'prepare repository with topic branches' '
 
 test_expect_success 'rebase on dirty worktree' '
 	echo dirty >>A &&
-	test_must_fail git rebase master
+	test_must_fail git rebase main
 '
 
 test_expect_success 'rebase on dirty cache' '
 	git add A &&
-	test_must_fail git rebase master
+	test_must_fail git rebase main
 '
 
-test_expect_success 'rebase against master' '
+test_expect_success 'rebase against main' '
 	git reset --hard HEAD &&
-	git rebase master
+	git rebase main
+'
+
+test_expect_success 'rebase sets ORIG_HEAD to pre-rebase state' '
+	git checkout -b orig-head topic &&
+	pre="$(git rev-parse --verify HEAD)" &&
+	git rebase main &&
+	test_cmp_rev "$pre" ORIG_HEAD &&
+	test_cmp_rev ! "$pre" HEAD
 '
 
 test_expect_success 'rebase, with <onto> and <upstream> specified as :/quuxery' '
@@ -85,28 +91,28 @@ test_expect_success 'HEAD was detached during rebase' '
 
 test_expect_success 'rebase from ambiguous branch name' '
 	git checkout -b topic side &&
-	git rebase master
+	git rebase main
 '
 
 test_expect_success 'rebase off of the previous branch using "-"' '
-	git checkout master &&
+	git checkout main &&
 	git checkout HEAD^ &&
 	git rebase @{-1} >expect.messages &&
-	git merge-base master HEAD >expect.forkpoint &&
+	git merge-base main HEAD >expect.forkpoint &&
 
-	git checkout master &&
+	git checkout main &&
 	git checkout HEAD^ &&
 	git rebase - >actual.messages &&
-	git merge-base master HEAD >actual.forkpoint &&
+	git merge-base main HEAD >actual.forkpoint &&
 
 	test_cmp expect.forkpoint actual.forkpoint &&
 	# the next one is dubious---we may want to say "-",
 	# instead of @{-1}, in the message
-	test_i18ncmp expect.messages actual.messages
+	test_cmp expect.messages actual.messages
 '
 
 test_expect_success 'rebase a single mode change' '
-	git checkout master &&
+	git checkout main &&
 	git branch -D topic &&
 	echo 1 >X &&
 	git add X &&
@@ -118,7 +124,7 @@ test_expect_success 'rebase a single mode change' '
 	test_chmod +x A &&
 	test_tick &&
 	git commit -m modechange &&
-	GIT_TRACE=1 git rebase master
+	GIT_TRACE=1 git rebase main
 '
 
 test_expect_success 'rebase is not broken by diff.renames' '
@@ -135,11 +141,13 @@ test_expect_success 'setup: recover' '
 
 test_expect_success 'Show verbose error when HEAD could not be detached' '
 	>B &&
+	test_when_finished "rm -f B" &&
 	test_must_fail git rebase topic 2>output.err >output.out &&
-	test_i18ngrep "The following untracked working tree files would be overwritten by checkout:" output.err &&
-	test_i18ngrep B output.err
+	test_grep "The following untracked working tree files would be overwritten by checkout:" output.err &&
+	test_grep B output.err &&
+	test_must_fail git rebase --quit 2>err &&
+	test_grep "no rebase in progress" err
 '
-rm -f B
 
 test_expect_success 'fail when upstream arg is missing and not on branch' '
 	git checkout topic &&
@@ -151,19 +159,43 @@ test_expect_success 'fail when upstream arg is missing and not configured' '
 	test_must_fail git rebase
 '
 
-test_expect_success 'default to common base in @{upstream}s reflog if no upstream arg' '
-	git checkout -b default-base master &&
+test_expect_success 'rebase works with format.useAutoBase' '
+	test_config format.useAutoBase true &&
+	git checkout topic &&
+	git rebase main
+'
+
+test_expect_success 'default to common base in @{upstream}s reflog if no upstream arg (--merge)' '
+	git checkout -b default-base main &&
 	git checkout -b default topic &&
 	git config branch.default.remote . &&
 	git config branch.default.merge refs/heads/default-base &&
-	git rebase &&
+	git rebase --merge &&
 	git rev-parse --verify default-base >expect &&
 	git rev-parse default~1 >actual &&
 	test_cmp expect actual &&
 	git checkout default-base &&
 	git reset --hard HEAD^ &&
 	git checkout default &&
-	git rebase &&
+	git rebase --merge &&
+	git rev-parse --verify default-base >expect &&
+	git rev-parse default~1 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'default to common base in @{upstream}s reflog if no upstream arg (--apply)' '
+	git checkout -B default-base main &&
+	git checkout -B default topic &&
+	git config branch.default.remote . &&
+	git config branch.default.merge refs/heads/default-base &&
+	git rebase --apply &&
+	git rev-parse --verify default-base >expect &&
+	git rev-parse default~1 >actual &&
+	test_cmp expect actual &&
+	git checkout default-base &&
+	git reset --hard HEAD^ &&
+	git checkout default &&
+	git rebase --apply &&
 	git rev-parse --verify default-base >expect &&
 	git rev-parse default~1 >actual &&
 	test_cmp expect actual
@@ -183,18 +215,30 @@ test_expect_success 'cherry-picked commits and fork-point work together' '
 	test_commit final_B B "Final B" &&
 	git rebase &&
 	echo Amended >expect &&
-	test_cmp A expect &&
+	test_cmp expect A &&
 	echo "Final B" >expect &&
-	test_cmp B expect &&
+	test_cmp expect B &&
 	echo C >expect &&
-	test_cmp C expect &&
+	test_cmp expect C &&
 	echo D >expect &&
-	test_cmp D expect
+	test_cmp expect D
 '
 
-test_expect_success 'rebase -q is quiet' '
+test_expect_success 'rebase --apply -q is quiet' '
 	git checkout -b quiet topic &&
-	git rebase -q master >output.out 2>&1 &&
+	git rebase --apply -q main >output.out 2>&1 &&
+	test_must_be_empty output.out
+'
+
+test_expect_success 'rebase --merge -q is quiet' '
+	git checkout -B quiet topic &&
+	git rebase --merge -q main >output.out 2>&1 &&
+	test_must_be_empty output.out
+'
+
+test_expect_success 'rebase --exec -q is quiet' '
+	git checkout -B quiet topic &&
+	git rebase --exec true -q main >output.out 2>&1 &&
 	test_must_be_empty output.out
 '
 
@@ -226,10 +270,22 @@ test_expect_success 'rebase can copy notes' '
 	test "a note" = "$(git notes show HEAD)"
 '
 
-test_expect_success 'rebase -m can copy notes' '
+test_expect_success 'rebase --apply can copy notes' '
 	git reset --hard n3 &&
-	git rebase -m --onto n1 n2 &&
+	git rebase --apply --onto n1 n2 &&
 	test "a note" = "$(git notes show HEAD)"
+'
+
+test_expect_success 'rebase drops notes of dropped commits' '
+	git checkout n1 &&
+	echo n3 >n3.t &&
+	echo n4 >n4.t &&
+	git add n3.t n4.t &&
+	git commit -m n34 &&
+	git rebase HEAD n3 &&
+	test_commit_message HEAD -m n2 &&
+	test_must_fail git notes list HEAD >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'rebase commit with an ancient timestamp' '
@@ -243,20 +299,20 @@ test_expect_success 'rebase commit with an ancient timestamp' '
 	git commit --date="@34567 +0600" -m "Old three" &&
 
 	git cat-file commit HEAD^^ >actual &&
-	grep "author .* 12345 +0400$" actual &&
+	test_grep "author .* 12345 +0400$" actual &&
 	git cat-file commit HEAD^ >actual &&
-	grep "author .* 23456 +0500$" actual &&
+	test_grep "author .* 23456 +0500$" actual &&
 	git cat-file commit HEAD >actual &&
-	grep "author .* 34567 +0600$" actual &&
+	test_grep "author .* 34567 +0600$" actual &&
 
 	git rebase --onto HEAD^^ HEAD^ &&
 
 	git cat-file commit HEAD >actual &&
-	grep "author .* 34567 +0600$" actual
+	test_grep "author .* 34567 +0600$" actual
 '
 
 test_expect_success 'rebase with "From " line in commit message' '
-	git checkout -b preserve-from master~1 &&
+	git checkout -b preserve-from main~1 &&
 	cat >From_.msg <<EOF &&
 Somebody embedded an mbox in a commit message
 
@@ -272,12 +328,12 @@ EOF
 	>From_ &&
 	git add From_ &&
 	git commit -F From_.msg &&
-	git rebase master &&
+	git rebase main &&
 	git log -1 --pretty=format:%B >out &&
 	test_cmp From_.msg out
 '
 
-test_expect_success 'rebase--am.sh and --show-current-patch' '
+test_expect_success 'rebase --apply and --show-current-patch' '
 	test_create_repo conflict-apply &&
 	(
 		cd conflict-apply &&
@@ -287,9 +343,45 @@ test_expect_success 'rebase--am.sh and --show-current-patch' '
 		echo two >>init.t &&
 		git commit -a -m two &&
 		git tag two &&
-		test_must_fail git rebase --onto init HEAD^ &&
+		test_must_fail git rebase --apply -f --onto init HEAD^ &&
 		GIT_TRACE=1 git rebase --show-current-patch >/dev/null 2>stderr &&
-		grep "show.*$(git rev-parse two)" stderr
+		test_grep "show.*$(git rev-parse two)" stderr
+	)
+'
+
+test_expect_success 'rebase --apply and .gitattributes' '
+	test_create_repo attributes &&
+	(
+		cd attributes &&
+		test_commit init &&
+		git config filter.test.clean "sed -e '\''s/smudged/clean/g'\''" &&
+		git config filter.test.smudge "sed -e '\''s/clean/smudged/g'\''" &&
+
+		test_commit second &&
+		git checkout -b test HEAD^ &&
+
+		echo "*.txt filter=test" >.gitattributes &&
+		git add .gitattributes &&
+		test_commit third &&
+
+		echo "This text is smudged." >a.txt &&
+		git add a.txt &&
+		test_commit fourth &&
+
+		git checkout -b removal HEAD^ &&
+		git rm .gitattributes &&
+		git add -u &&
+		test_commit fifth &&
+		git cherry-pick test &&
+
+		git checkout test &&
+		git rebase main &&
+		test_grep "smudged" a.txt &&
+
+		git checkout removal &&
+		git reset --hard &&
+		git rebase main &&
+		test_grep "clean" a.txt
 	)
 '
 
@@ -306,9 +398,92 @@ test_expect_success 'rebase--merge.sh and --show-current-patch' '
 		test_must_fail git rebase --merge --onto init HEAD^ &&
 		git rebase --show-current-patch >actual.patch &&
 		GIT_TRACE=1 git rebase --show-current-patch >/dev/null 2>stderr &&
-		grep "show.*REBASE_HEAD" stderr &&
+		test_grep "show.*REBASE_HEAD" stderr &&
 		test "$(git rev-parse REBASE_HEAD)" = "$(git rev-parse two)"
 	)
+'
+
+test_expect_success 'switch to branch checked out here' '
+	git checkout main &&
+	git rebase main main
+'
+
+test_expect_success 'switch to branch checked out elsewhere fails' '
+	test_when_finished "
+		git worktree remove wt1 &&
+		git worktree remove wt2 &&
+		git branch -d shared
+	" &&
+	git worktree add wt1 -b shared &&
+	git worktree add wt2 -f shared &&
+	# we test in both worktrees to ensure that works
+	# as expected with "first" and "next" worktrees
+	test_must_fail git -C wt1 rebase shared shared &&
+	test_must_fail git -C wt2 rebase shared shared
+'
+
+test_expect_success 'switch to branch not checked out' '
+	git checkout main &&
+	git branch other &&
+	git rebase main other
+'
+
+test_expect_success 'switch to non-branch detaches HEAD' '
+	git checkout main &&
+	old_main=$(git rev-parse HEAD) &&
+	git rebase First Second^0 &&
+	test_cmp_rev HEAD Second &&
+	test_cmp_rev main $old_main &&
+	test_must_fail git symbolic-ref HEAD
+'
+
+test_expect_success 'refuse to switch to branch checked out elsewhere' '
+	git checkout main &&
+	git worktree add wt &&
+	test_must_fail git -C wt rebase main main 2>err &&
+	test_grep "already used by worktree at" err &&
+	test_must_fail git -C wt rebase --quit 2>err &&
+	test_grep "no rebase in progress" err
+'
+
+test_expect_success 'rebase when inside worktree subdirectory' '
+	git init main-wt &&
+	(
+		cd main-wt &&
+		git commit --allow-empty -m "initial" &&
+		mkdir -p foo/bar &&
+		test_commit foo/bar/baz &&
+		mkdir -p a/b &&
+		test_commit a/b/c &&
+		# create another branch for our other worktree
+		git branch other &&
+		git worktree add ../other-wt other &&
+		cd ../other-wt &&
+		# create and cd into a subdirectory
+		mkdir -p random/dir &&
+		cd random/dir &&
+		# now do the rebase
+		git rebase --onto HEAD^^ HEAD^  # drops the HEAD^ commit
+	)
+'
+
+test_expect_success 'git rebase --update-ref with core.commentChar and branch on worktree' '
+	test_when_finished git branch -D base topic2 &&
+	test_when_finished git checkout main &&
+	test_when_finished git branch -D wt-topic &&
+	test_when_finished git worktree remove wt-topic &&
+	git checkout main &&
+	git checkout -b base &&
+	git checkout -b topic2 &&
+	test_commit msg2 &&
+	git worktree add wt-topic &&
+	git checkout base &&
+	test_commit msg3 &&
+	git checkout topic2 &&
+	GIT_SEQUENCE_EDITOR="cat >actual" git -c core.commentChar=% \
+		 rebase -i --update-refs base &&
+	test_grep "% Ref refs/heads/wt-topic checked out at" actual &&
+	test_grep "% Ref refs/heads/topic2 checked out at" actual
 '
 
 test_done

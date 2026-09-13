@@ -1,18 +1,19 @@
-#include "cache.h"
-#include "run-command.h"
-#include "xdiff-interface.h"
-#include "ll-merge.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
+#include "merge-ll.h"
 #include "blob.h"
 #include "merge-blobs.h"
-#include "object-store.h"
+#include "odb.h"
 
 static int fill_mmfile_blob(mmfile_t *f, struct blob *obj)
 {
 	void *buf;
-	unsigned long size;
+	size_t size;
 	enum object_type type;
 
-	buf = read_object_file(&obj->object.oid, &type, &size);
+	buf = odb_read_object(the_repository->objects, &obj->object.oid,
+			      &type, &size);
 	if (!buf)
 		return -1;
 	if (type != OBJ_BLOB) {
@@ -29,9 +30,14 @@ static void free_mmfile(mmfile_t *f)
 	free(f->ptr);
 }
 
-static void *three_way_filemerge(const char *path, mmfile_t *base, mmfile_t *our, mmfile_t *their, unsigned long *size)
+static void *three_way_filemerge(struct index_state *istate,
+				 const char *path,
+				 mmfile_t *base,
+				 mmfile_t *our,
+				 mmfile_t *their,
+				 size_t *size)
 {
-	int merge_status;
+	enum ll_merge_result merge_status;
 	mmbuffer_t res;
 
 	/*
@@ -41,15 +47,21 @@ static void *three_way_filemerge(const char *path, mmfile_t *base, mmfile_t *our
 	 * common ancestor.
 	 */
 	merge_status = ll_merge(&res, path, base, NULL,
-				our, ".our", their, ".their", NULL);
+				our, ".our", their, ".their",
+				istate, NULL);
 	if (merge_status < 0)
 		return NULL;
+	if (merge_status == LL_MERGE_BINARY_CONFLICT)
+		warning("Cannot merge binary files: %s (%s vs. %s)",
+			path, ".our", ".their");
 
 	*size = res.size;
 	return res.ptr;
 }
 
-void *merge_blobs(const char *path, struct blob *base, struct blob *our, struct blob *their, unsigned long *size)
+void *merge_blobs(struct index_state *istate, const char *path,
+		  struct blob *base, struct blob *our,
+		  struct blob *their, size_t *size)
 {
 	void *res = NULL;
 	mmfile_t f1, f2, common;
@@ -67,7 +79,8 @@ void *merge_blobs(const char *path, struct blob *base, struct blob *our, struct 
 			return NULL;
 		if (!our)
 			our = their;
-		return read_object_file(&our->object.oid, &type, size);
+		return odb_read_object(the_repository->objects, &our->object.oid,
+				       &type, size);
 	}
 
 	if (fill_mmfile_blob(&f1, our) < 0)
@@ -82,7 +95,7 @@ void *merge_blobs(const char *path, struct blob *base, struct blob *our, struct 
 		common.ptr = xstrdup("");
 		common.size = 0;
 	}
-	res = three_way_filemerge(path, &common, &f1, &f2, size);
+	res = three_way_filemerge(istate, path, &common, &f1, &f2, size);
 	free_mmfile(&common);
 out_free_f2_f1:
 	free_mmfile(&f2);

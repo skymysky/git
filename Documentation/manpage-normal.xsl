@@ -1,13 +1,14 @@
 <!-- manpage-normal.xsl:
-     special settings for manpages rendered from asciidoc+docbook
-     handles anything we want to keep away from docbook-xsl 1.72.0 -->
+     special settings for manpages rendered from asciidoc+docbook -->
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
 		version="1.0">
 
-<xsl:import href="manpage-base.xsl"/>
 
-<!-- these are the normal values for the roff control characters -->
-<xsl:param name="git.docbook.backslash">\</xsl:param>
-<xsl:param name="git.docbook.dot"	>.</xsl:param>
+<!-- these params silence some output from xmlto -->
+<xsl:param name="man.output.quietly" select="1"/>
+<xsl:param name="refentry.meta.get.quietly" select="1"/>
+
+<!-- unset maximum length of title -->
+<xsl:param name="man.th.title.max.length"/>
 
 </xsl:stylesheet>

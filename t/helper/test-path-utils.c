@@ -1,14 +1,24 @@
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "test-tool.h"
-#include "cache.h"
+#include "abspath.h"
+#include "environment.h"
+#include "path.h"
+#include "read-cache-ll.h"
+#include "setup.h"
 #include "string-list.h"
+#include "trace.h"
 #include "utf8.h"
+#include "copy.h"
 
 /*
  * A "string_list_each_func_t" function that normalizes an entry from
  * GIT_CEILING_DIRECTORIES.  If the path is unusable for some reason,
  * die with an explanation.
  */
-static int normalize_ceiling_entry(struct string_list_item *item, void *unused)
+static int normalize_ceiling_entry(struct string_list_item *item,
+				   void *data UNUSED)
 {
 	char *ceil = item->string;
 
@@ -31,7 +41,7 @@ static void normalize_argv_string(const char **var, const char *input)
 		*var = input;
 
 	if (*var && (**var == '<' || **var == '('))
-		die("Bad value: %s\n", input);
+		die("Bad value: %s", input);
 }
 
 struct test_data {
@@ -71,12 +81,12 @@ static int test_function(struct test_data *data, char *(*func)(char *input),
 		if (!strcmp(to, data[i].to))
 			continue;
 		if (!data[i].alternative)
-			error("FAIL: %s(%s) => '%s' != '%s'\n",
+			error("FAIL: %s(%s) => '%s' != '%s'",
 				funcname, data[i].from, to, data[i].to);
 		else if (!strcmp(to, data[i].alternative))
 			continue;
 		else
-			error("FAIL: %s(%s) => '%s' != '%s', '%s'\n",
+			error("FAIL: %s(%s) => '%s' != '%s', '%s'",
 				funcname, data[i].from, to, data[i].to,
 				data[i].alternative);
 		failed = 1;
@@ -172,9 +182,129 @@ static struct test_data dirname_data[] = {
 	{ NULL,              NULL     }
 };
 
-static int is_dotgitmodules(const char *path)
+static int check_dotfile(const char *x, const char **argv,
+			 int (*is_hfs)(const char *),
+			 int (*is_ntfs)(const char *))
 {
-	return is_hfs_dotgitmodules(path) || is_ntfs_dotgitmodules(path);
+	int res = 0, expect = 1;
+	for (; *argv; argv++) {
+		if (!strcmp("--not", *argv))
+			expect = !expect;
+		else if (expect != (is_hfs(*argv) || is_ntfs(*argv)))
+			res = error("'%s' is %s.git%s", *argv,
+				    expect ? "not " : "", x);
+		else
+			fprintf(stderr, "ok: '%s' is %s.git%s\n",
+				*argv, expect ? "" : "not ", x);
+	}
+	return !!res;
+}
+
+static int cmp_by_st_size(const void *a, const void *b)
+{
+	intptr_t x = (intptr_t)((struct string_list_item *)a)->util;
+	intptr_t y = (intptr_t)((struct string_list_item *)b)->util;
+
+	return x > y ? -1 : (x < y ? +1 : 0);
+}
+
+/*
+ * A very simple, reproducible pseudo-random generator. Copied from
+ * `test-genrandom.c`.
+ */
+static uint64_t my_random_value = 1234;
+
+static uint64_t my_random(void)
+{
+	my_random_value = my_random_value * 1103515245 + 12345;
+	return my_random_value;
+}
+
+/*
+ * A fast approximation of the square root, without requiring math.h.
+ *
+ * It uses Newton's method to approximate the solution of 0 = x^2 - value.
+ */
+static double my_sqrt(double value)
+{
+	const double epsilon = 1e-6;
+	double x = value;
+
+	if (value == 0)
+		return 0;
+
+	for (;;) {
+		double delta = (value / x - x) / 2;
+		if (delta < epsilon && delta > -epsilon)
+			return x + delta;
+		x += delta;
+	}
+}
+
+static int protect_ntfs_hfs_benchmark(int argc, const char **argv)
+{
+	size_t i, j, nr, min_len = 3, max_len = 20;
+	char **names;
+	int repetitions = 15, file_mode = 0100644;
+	uint64_t begin, end;
+	double m[3][2], v[3][2];
+	uint64_t cumul;
+	double cumul2;
+	int ntfs, hfs;
+
+	if (argc > 1 && !strcmp(argv[1], "--with-symlink-mode")) {
+		file_mode = 0120000;
+		argc--;
+		argv++;
+	}
+
+	nr = argc > 1 ? strtoul(argv[1], NULL, 0) : 1000000;
+	ALLOC_ARRAY(names, nr);
+
+	if (argc > 2) {
+		min_len = strtoul(argv[2], NULL, 0);
+		if (argc > 3)
+			max_len = strtoul(argv[3], NULL, 0);
+		if (min_len > max_len)
+			die("min_len > max_len");
+	}
+
+	for (i = 0; i < nr; i++) {
+		size_t len = min_len + (my_random() % (max_len + 1 - min_len));
+
+		names[i] = xmallocz(len);
+		while (len > 0)
+			names[i][--len] = (char)(' ' + (my_random() % ('\x7f' - ' ')));
+	}
+
+	if (!the_repository->gitdir)
+		the_repository->gitdir = xstrdup(".git");
+
+	for (ntfs = 0; ntfs < 2; ntfs++)
+		for (hfs = 0; hfs < 2; hfs++) {
+			repo_config_values(the_repository)->protect_ntfs = ntfs;
+			repo_config_values(the_repository)->protect_hfs = hfs;
+			cumul = 0;
+			cumul2 = 0;
+			for (i = 0; i < repetitions; i++) {
+				begin = getnanotime();
+				for (j = 0; j < nr; j++)
+					verify_path(names[j], file_mode);
+				end = getnanotime();
+				printf("protect_ntfs = %d, protect_hfs = %d: %lfms\n", ntfs, hfs, (end-begin) / (double)1e6);
+				cumul += end - begin;
+				cumul2 += (end - begin) * (end - begin);
+			}
+			m[ntfs][hfs] = cumul / (double)repetitions;
+			v[ntfs][hfs] = my_sqrt(cumul2 / (double)repetitions - m[ntfs][hfs] * m[ntfs][hfs]);
+			printf("mean: %lfms, stddev: %lfms\n", m[ntfs][hfs] / (double)1e6, v[ntfs][hfs] / (double)1e6);
+		}
+
+	for (ntfs = 0; ntfs < 2; ntfs++)
+		for (hfs = 0; hfs < 2; hfs++)
+			printf("ntfs=%d/hfs=%d: %lf%% slower\n", ntfs, hfs, (m[ntfs][hfs] - m[0][0]) * 100 / m[0][0]);
+
+	return 0;
 }
 
 int cmd__path_utils(int argc, const char **argv)
@@ -182,18 +312,33 @@ int cmd__path_utils(int argc, const char **argv)
 	if (argc == 3 && !strcmp(argv[1], "normalize_path_copy")) {
 		char *buf = xmallocz(strlen(argv[2]));
 		int rv = normalize_path_copy(buf, argv[2]);
-		if (rv)
-			buf = "++failed++";
-		puts(buf);
+		puts(rv ? "++failed++" : buf);
+		free(buf);
 		return 0;
 	}
 
 	if (argc >= 2 && !strcmp(argv[1], "real_path")) {
+		struct strbuf realpath = STRBUF_INIT;
 		while (argc > 2) {
-			puts(real_path(argv[2]));
+			strbuf_realpath(&realpath, argv[2], 1);
+			puts(realpath.buf);
 			argc--;
 			argv++;
 		}
+		strbuf_release(&realpath);
+		return 0;
+	}
+
+	if (argc >= 2 && !strcmp(argv[1], "readlink")) {
+		struct strbuf target = STRBUF_INIT;
+		while (argc > 2) {
+			if (strbuf_readlink(&target, argv[2], 0) < 0)
+				die_errno("cannot read link at '%s'", argv[2]);
+			puts(target.buf);
+			argc--;
+			argv++;
+		}
+		strbuf_release(&target);
 		return 0;
 	}
 
@@ -209,6 +354,7 @@ int cmd__path_utils(int argc, const char **argv)
 	if (argc == 4 && !strcmp(argv[1], "longest_ancestor_length")) {
 		int len;
 		struct string_list ceiling_dirs = STRING_LIST_INIT_DUP;
+		const char path_sep[] = { PATH_SEP, '\0' };
 		char *path = xstrdup(argv[2]);
 
 		/*
@@ -223,7 +369,7 @@ int cmd__path_utils(int argc, const char **argv)
 		 */
 		if (normalize_path_copy(path, path))
 			die("Path \"%s\" could not be normalized", argv[2]);
-		string_list_split(&ceiling_dirs, argv[3], PATH_SEP, -1);
+		string_list_split(&ceiling_dirs, argv[3], path_sep, -1);
 		filter_string_list(&ceiling_dirs, 0,
 				   normalize_ceiling_entry, NULL);
 		len = longest_ancestor_length(path, &ceiling_dirs);
@@ -237,9 +383,12 @@ int cmd__path_utils(int argc, const char **argv)
 		const char *prefix = argv[2];
 		int prefix_len = strlen(prefix);
 		int nongit_ok;
-		setup_git_directory_gently(&nongit_ok);
+		setup_git_directory_gently(the_repository, &nongit_ok);
 		while (argc > 3) {
-			puts(prefix_path(prefix, prefix_len, argv[3]));
+			char *pfx = prefix_path(the_repository, prefix, prefix_len, argv[3]);
+
+			puts(pfx);
+			free(pfx);
 			argc--;
 			argv++;
 		}
@@ -249,6 +398,7 @@ int cmd__path_utils(int argc, const char **argv)
 	if (argc == 4 && !strcmp(argv[1], "strip_path_suffix")) {
 		char *prefix = strip_path_suffix(argv[2], argv[3]);
 		printf("%s\n", prefix ? prefix : "(null)");
+		free(prefix);
 		return 0;
 	}
 
@@ -278,17 +428,125 @@ int cmd__path_utils(int argc, const char **argv)
 		return test_function(dirname_data, posix_dirname, argv[1]);
 
 	if (argc > 2 && !strcmp(argv[1], "is_dotgitmodules")) {
+		return check_dotfile("modules", argv + 2,
+				     is_hfs_dotgitmodules,
+				     is_ntfs_dotgitmodules);
+	}
+	if (argc > 2 && !strcmp(argv[1], "is_dotgitignore")) {
+		return check_dotfile("ignore", argv + 2,
+				     is_hfs_dotgitignore,
+				     is_ntfs_dotgitignore);
+	}
+	if (argc > 2 && !strcmp(argv[1], "is_dotgitattributes")) {
+		return check_dotfile("attributes", argv + 2,
+				     is_hfs_dotgitattributes,
+				     is_ntfs_dotgitattributes);
+	}
+	if (argc > 2 && !strcmp(argv[1], "is_dotmailmap")) {
+		return check_dotfile("mailmap", argv + 2,
+				     is_hfs_dotmailmap,
+				     is_ntfs_dotmailmap);
+	}
+
+	if (argc > 2 && !strcmp(argv[1], "file-size")) {
+		int res = 0, i;
+		struct stat st;
+
+		for (i = 2; i < argc; i++)
+			if (stat(argv[i], &st))
+				res = error_errno("Cannot stat '%s'", argv[i]);
+			else
+				printf("%"PRIuMAX"\n", (uintmax_t)st.st_size);
+		return !!res;
+	}
+
+	if (argc == 4 && !strcmp(argv[1], "skip-n-bytes")) {
+		int fd = open(argv[2], O_RDONLY), offset = atoi(argv[3]);
+		char buffer[65536];
+
+		if (fd < 0)
+			die_errno("could not open '%s'", argv[2]);
+		if (lseek(fd, offset, SEEK_SET) < 0)
+			die_errno("could not skip %d bytes", offset);
+		for (;;) {
+			ssize_t count = read(fd, buffer, sizeof(buffer));
+			if (count < 0)
+				die_errno("could not read '%s'", argv[2]);
+			if (!count)
+				break;
+			if (write(1, buffer, count) < 0)
+				die_errno("could not write to stdout");
+		}
+		close(fd);
+		return 0;
+	}
+
+	if (argc > 5 && !strcmp(argv[1], "slice-tests")) {
+		int res = 0;
+		long slice, slices_total, i;
+		struct string_list list = STRING_LIST_INIT_NODUP;
+		struct stat st;
+
+		slices_total = strtol(argv[3], NULL, 10);
+		if (slices_total < 1)
+			die("there must be at least one slice, got '%s'",
+			    argv[3]);
+
+		slice = strtol(argv[2], NULL, 10);
+		if (1 > slice || slice > slices_total)
+			die("slice must be in the range 1 <= slice <= %ld, got '%s'",
+			    slices_total, argv[2]);
+
+		for (i = 4; i < argc; i++)
+			if (stat(argv[i], &st))
+				res = error_errno("Cannot stat '%s'", argv[i]);
+			else
+				string_list_append(&list, argv[i])->util =
+					(void *)(intptr_t)st.st_size;
+		QSORT(list.items, list.nr, cmp_by_st_size);
+		for (i = slice - 1; i < list.nr; i+= slices_total)
+			printf("%s\n", list.items[i].string);
+
+		return !!res;
+	}
+
+	if (argc > 1 && !strcmp(argv[1], "protect_ntfs_hfs"))
+		return !!protect_ntfs_hfs_benchmark(argc - 1, argv + 1);
+
+	if (argc > 1 && !strcmp(argv[1], "is_valid_path")) {
 		int res = 0, expect = 1, i;
+
 		for (i = 2; i < argc; i++)
 			if (!strcmp("--not", argv[i]))
-				expect = !expect;
-			else if (expect != is_dotgitmodules(argv[i]))
-				res = error("'%s' is %s.gitmodules", argv[i],
-					    expect ? "not " : "");
+				expect = 0;
+			else if (expect != is_valid_path(argv[i]))
+				res = error("'%s' is%s a valid path",
+					    argv[i], expect ? " not" : "");
 			else
-				fprintf(stderr, "ok: '%s' is %s.gitmodules\n",
-					argv[i], expect ? "" : "not ");
+				fprintf(stderr,
+					"'%s' is%s a valid path\n",
+					argv[i], expect ? "" : " not");
+
 		return !!res;
+	}
+
+	if (argc > 1 && !strcmp(argv[1], "is_path_owned_by_current_user")) {
+		int res = 0;
+
+		for (int i = 2; i < argc; i++) {
+			struct strbuf buf = STRBUF_INIT;
+
+			if (is_path_owned_by_current_user(argv[i], &buf))
+				printf("'%s' is owned by current SID\n", argv[i]);
+			else {
+				printf("'%s' is not owned by current SID: %s\n", argv[i], buf.buf);
+				res = 1;
+			}
+
+			strbuf_release(&buf);
+		}
+
+		return res;
 	}
 
 	fprintf(stderr, "%s: unknown function name: %s\n", argv[0],

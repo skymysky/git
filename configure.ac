@@ -85,7 +85,7 @@ AC_DEFUN([GIT_PARSE_WITH],
 
 # GIT_PARSE_WITH_SET_MAKE_VAR(WITHNAME, VAR, HELP_TEXT)
 # -----------------------------------------------------
-# Set VAR to the value specied by --with-WITHNAME.
+# Set VAR to the value specified by --with-WITHNAME.
 # No verification of arguments is performed, but warnings are issued
 # if either 'yes' or 'no' is specified.
 # HELP_TEXT is presented when --help is called.
@@ -94,7 +94,7 @@ AC_DEFUN([GIT_PARSE_WITH_SET_MAKE_VAR],
 [AC_ARG_WITH([$1],
  [AS_HELP_STRING([--with-$1=VALUE], $3)],
  if test -n "$withval"; then
-  if test "$withval" = "yes" -o "$withval" = "no"; then
+  if test "$withval" = "yes" || test "$withval" = "no"; then
     AC_MSG_WARN([You likely do not want either 'yes' or 'no' as]
 		     [a value for $1 ($2).  Maybe you do...?])
   fi
@@ -142,7 +142,7 @@ fi
 ## Configure body starts here.
 
 AC_PREREQ(2.59)
-AC_INIT([git], [@@GIT_VERSION@@], [git@vger.kernel.org])
+AC_INIT([git], [@GIT_VERSION@], [git@vger.kernel.org])
 
 AC_CONFIG_SRCDIR([git.c])
 
@@ -237,9 +237,6 @@ AC_MSG_NOTICE([CHECKS for site configuration])
 # tests.  These tests take up a significant amount of the total test time
 # but are not needed unless you plan to talk to SVN repos.
 #
-# Define PPC_SHA1 environment variable when running make to make use of
-# a bundled SHA1 routine optimized for PowerPC.
-#
 # Define NO_OPENSSL environment variable if you do not have OpenSSL.
 #
 # Define OPENSSLDIR=/foo/bar if your openssl header and library files are in
@@ -252,16 +249,17 @@ GIT_PARSE_WITH([openssl]))
 # Define USE_LIBPCRE if you have and want to use libpcre. Various
 # commands such as log and grep offer runtime options to use
 # Perl-compatible regular expressions instead of standard or extended
-# POSIX regular expressions.
-#
-# USE_LIBPCRE is a synonym for USE_LIBPCRE2, define USE_LIBPCRE1
-# instead if you'd like to use the legacy version 1 of the PCRE
-# library. Support for version 1 will likely be removed in some future
-# release of Git, as upstream has all but abandoned it.
+# POSIX regular expressions. Only libpcre version 2 is supported.
 #
 # Define LIBPCREDIR=/foo/bar if your PCRE header and library files are in
 # /foo/bar/include and /foo/bar/lib directories.
 #
+
+AC_ARG_WITH(libpcre1,
+AS_HELP_STRING([--with-libpcre1],[DEPRECATED]),
+    AC_MSG_ERROR([support for --with-libpcre1 has been removed. Use --with-libpcre2!])
+    )
+
 AC_ARG_WITH(libpcre,
 AS_HELP_STRING([--with-libpcre],[synonym for --with-libpcre2]),
     if test "$withval" = "no"; then
@@ -277,31 +275,11 @@ AS_HELP_STRING([--with-libpcre],[synonym for --with-libpcre2]),
 	GIT_CONF_SUBST([LIBPCREDIR])
     fi)
 
-AC_ARG_WITH(libpcre1,
-AS_HELP_STRING([--with-libpcre1],[support Perl-compatible regexes via libpcre1 (default is NO)])
-AS_HELP_STRING([],           [ARG can be also prefix for libpcre library and headers]),
-    if test "$withval" = "no"; then
-	USE_LIBPCRE1=
-    elif test "$withval" = "yes"; then
-	USE_LIBPCRE1=YesPlease
-    else
-	USE_LIBPCRE1=YesPlease
-	LIBPCREDIR=$withval
-	AC_MSG_NOTICE([Setting LIBPCREDIR to $LIBPCREDIR])
-        dnl USE_LIBPCRE1 can still be modified below, so don't substitute
-        dnl it yet.
-	GIT_CONF_SUBST([LIBPCREDIR])
-    fi)
-
 AC_ARG_WITH(libpcre2,
 AS_HELP_STRING([--with-libpcre2],[support Perl-compatible regexes via libpcre2 (default is NO)])
 AS_HELP_STRING([],           [ARG can be also prefix for libpcre library and headers]),
     if test -n "$USE_LIBPCRE2"; then
         AC_MSG_ERROR([Only supply one of --with-libpcre or its synonym --with-libpcre2!])
-    fi
-
-    if test -n "$USE_LIBPCRE1"; then
-        AC_MSG_ERROR([Only supply one of --with-libpcre1 or --with-libpcre2!])
     fi
 
     if test "$withval" = "no"; then
@@ -475,8 +453,18 @@ else
       if test "$git_cv_ld_rpath" = "yes"; then
          CC_LD_DYNPATH=-rpath
       else
-         CC_LD_DYNPATH=
-         AC_MSG_WARN([linker does not support runtime path to dynamic libraries])
+         AC_CACHE_CHECK([if linker supports -Wl,+b,], git_cv_ld_wl_b, [
+            SAVE_LDFLAGS="${LDFLAGS}"
+            LDFLAGS="${SAVE_LDFLAGS} -Wl,+b,/"
+            AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])], [git_cv_ld_wl_b=yes], [git_cv_ld_wl_b=no])
+            LDFLAGS="${SAVE_LDFLAGS}"
+         ])
+         if test "$git_cv_ld_wl_b" = "yes"; then
+            CC_LD_DYNPATH=-Wl,+b,
+          else
+             CC_LD_DYNPATH=
+             AC_MSG_WARN([linker does not support runtime path to dynamic libraries])
+          fi
       fi
    fi
 fi
@@ -516,14 +504,6 @@ if test -n "$ASCIIDOC"; then
 	esac
 fi
 
-if grep -a ascii configure.ac >/dev/null; then
-  AC_MSG_RESULT([Using 'grep -a' for sane_grep])
-  SANE_TEXT_GREP=-a
-else
-  SANE_TEXT_GREP=
-fi
-GIT_CONF_SUBST([SANE_TEXT_GREP])
-
 ## Checks for libraries.
 AC_MSG_NOTICE([CHECKS for libraries])
 #
@@ -544,24 +524,8 @@ GIT_CONF_SUBST([NEEDS_SSL_WITH_CRYPTO])
 GIT_CONF_SUBST([NO_OPENSSL])
 
 #
-# Handle the USE_LIBPCRE1 and USE_LIBPCRE2 options potentially set
-# above.
+# Handle the USE_LIBPCRE options potentially set above.
 #
-
-if test -n "$USE_LIBPCRE1"; then
-
-GIT_STASH_FLAGS($LIBPCREDIR)
-
-AC_CHECK_LIB([pcre], [pcre_version],
-[USE_LIBPCRE1=YesPlease],
-[USE_LIBPCRE1=])
-
-GIT_UNSTASH_FLAGS($LIBPCREDIR)
-
-GIT_CONF_SUBST([USE_LIBPCRE1])
-
-fi
-
 
 if test -n "$USE_LIBPCRE2"; then
 
@@ -582,6 +546,8 @@ fi
 # git-http-push are not built, and you cannot use http:// and https://
 # transports.
 
+if test -z "$NO_CURL"; then
+
 GIT_STASH_FLAGS($CURLDIR)
 
 AC_CHECK_LIB([curl], [curl_global_init],
@@ -589,6 +555,8 @@ AC_CHECK_LIB([curl], [curl_global_init],
 [NO_CURL=YesPlease])
 
 GIT_UNSTASH_FLAGS($CURLDIR)
+
+fi
 
 GIT_CONF_SUBST([NO_CURL])
 
@@ -600,17 +568,14 @@ AC_CHECK_PROG([CURL_CONFIG], [curl-config],
 
 if test $CURL_CONFIG != no; then
     GIT_CONF_SUBST([CURL_CONFIG])
-    if test -z "${NO_OPENSSL}"; then
-      AC_MSG_CHECKING([if Curl supports SSL])
-      if test $(curl-config --features|grep SSL) = SSL; then
-         NEEDS_SSL_WITH_CURL=YesPlease
-         AC_MSG_RESULT([yes])
-      else
-         NEEDS_SSL_WITH_CURL=
-         AC_MSG_RESULT([no])
-      fi
-      GIT_CONF_SUBST([NEEDS_SSL_WITH_CURL])
+
+    if test -z "$CURL_CONFIG_OPTS"; then
+        CURL_CONFIG_OPTS="--libs"
     fi
+
+    CURL_LDFLAGS=$($CURL_CONFIG $CURL_CONFIG_OPTS)
+    AC_MSG_NOTICE([Setting CURL_LDFLAGS to '$CURL_LDFLAGS'])
+    GIT_CONF_SUBST([CURL_LDFLAGS], [$CURL_LDFLAGS])
 fi
 
 fi
@@ -620,6 +585,8 @@ fi
 # Define NO_EXPAT if you do not have expat installed.  git-http-push is
 # not built, and you cannot push using http:// and https:// transports.
 
+if test -z "$NO_EXPAT"; then
+
 GIT_STASH_FLAGS($EXPATDIR)
 
 AC_CHECK_LIB([expat], [XML_ParserCreate],
@@ -627,6 +594,8 @@ AC_CHECK_LIB([expat], [XML_ParserCreate],
 [NO_EXPAT=YesPlease])
 
 GIT_UNSTASH_FLAGS($EXPATDIR)
+
+fi
 
 GIT_CONF_SUBST([NO_EXPAT])
 
@@ -675,13 +644,14 @@ LIBS="$old_LIBS"
 GIT_UNSTASH_FLAGS($ICONVDIR)
 
 GIT_CONF_SUBST([NEEDS_LIBICONV])
-GIT_CONF_SUBST([NO_ICONV])
 
 if test -n "$NO_ICONV"; then
     NEEDS_LIBICONV=
 fi
 
 fi
+
+GIT_CONF_SUBST([NO_ICONV])
 
 #
 # Define NO_DEFLATE_BOUND if deflateBound is missing from zlib.
@@ -766,9 +736,19 @@ AC_CHECK_LIB([c], [basename],
 GIT_CONF_SUBST([NEEDS_LIBGEN])
 test -n "$NEEDS_LIBGEN" && LIBS="$LIBS -lgen"
 
-AC_CHECK_LIB([c], [gettext],
-[LIBC_CONTAINS_LIBINTL=YesPlease],
-[LIBC_CONTAINS_LIBINTL=])
+AC_DEFUN([LIBINTL_SRC], [
+AC_LANG_PROGRAM([[
+#include <libintl.h>
+]],[[
+char *msg = gettext("test");
+]])])
+
+AC_MSG_CHECKING([if libc contains libintl])
+AC_LINK_IFELSE([LIBINTL_SRC],
+	[AC_MSG_RESULT([yes])
+	LIBC_CONTAINS_LIBINTL=YesPlease],
+	[AC_MSG_RESULT([no])
+	LIBC_CONTAINS_LIBINTL=])
 GIT_CONF_SUBST([LIBC_CONTAINS_LIBINTL])
 
 #
@@ -791,6 +771,12 @@ AC_CHECK_HEADER([sys/select.h],
 [NO_SYS_SELECT_H=],
 [NO_SYS_SELECT_H=UnfortunatelyYes])
 GIT_CONF_SUBST([NO_SYS_SELECT_H])
+#
+# Define NO_POLL_H if you don't have poll.h
+AC_CHECK_HEADER([poll.h],
+[NO_POLL_H=],
+[NO_POLL_H=UnfortunatelyYes])
+GIT_CONF_SUBST([NO_POLL_H])
 #
 # Define NO_SYS_POLL_H if you don't have sys/poll.h
 AC_CHECK_HEADER([sys/poll.h],
@@ -821,11 +807,60 @@ AC_MSG_CHECKING([for old iconv()])
 AC_COMPILE_IFELSE([OLDICONVTEST_SRC],
 	[AC_MSG_RESULT([no])],
 	[AC_MSG_RESULT([yes])
+	AC_DEFINE(HAVE_OLD_ICONV, 1)
 	OLD_ICONV=UnfortunatelyYes])
 
 GIT_UNSTASH_FLAGS($ICONVDIR)
 
 GIT_CONF_SUBST([OLD_ICONV])
+
+#
+# Define ICONV_OMITS_BOM if you are on a system which
+# iconv omits bom for utf-{16,32}
+if test -z "$NO_ICONV"; then
+AC_CACHE_CHECK([whether iconv omits bom for utf-16 and utf-32],
+ [ac_cv_iconv_omits_bom],
+[
+old_LIBS="$LIBS"
+if test -n "$NEEDS_LIBICONV"; then
+	LIBS="$LIBS -liconv"
+fi
+
+AC_RUN_IFELSE(
+	[AC_LANG_PROGRAM([AC_INCLUDES_DEFAULT
+	#include <iconv.h>
+	#ifdef HAVE_OLD_ICONV
+	typedef const char *iconv_ibp;
+	#else
+	typedef char *iconv_ibp;
+	#endif
+	],
+	[[
+	int v;
+	iconv_t conv;
+	char in[] = "a"; iconv_ibp pin = in;
+	char out[20] = ""; char *pout = out;
+	size_t isz = sizeof in;
+	size_t osz = sizeof out;
+
+	conv = iconv_open("UTF-16", "UTF-8");
+	iconv(conv, &pin, &isz, &pout, &osz);
+	iconv_close(conv);
+	v = (unsigned char)(out[0]) + (unsigned char)(out[1]);
+	return v != 0xfe + 0xff;
+	]])],
+	[ac_cv_iconv_omits_bom=no],
+	[ac_cv_iconv_omits_bom=yes])
+
+LIBS="$old_LIBS"
+])
+if test "x$ac_cv_iconv_omits_bom" = xyes; then
+	ICONV_OMITS_BOM=Yes
+else
+	ICONV_OMITS_BOM=
+fi
+GIT_CONF_SUBST([ICONV_OMITS_BOM])
+fi
 
 ## Checks for typedefs, structures, and compiler characteristics.
 AC_MSG_NOTICE([CHECKS for typedefs, structures, and compiler characteristics])
@@ -1031,6 +1066,7 @@ AC_CHECK_LIB([iconv], [locale_charset],
        [AC_CHECK_LIB([charset], [locale_charset],
                      [CHARSET_LIB=-lcharset])])
 GIT_CONF_SUBST([CHARSET_LIB])
+
 #
 # Define HAVE_CLOCK_GETTIME=YesPlease if clock_gettime is available.
 GIT_CHECK_FUNC(clock_gettime,
@@ -1053,6 +1089,14 @@ AC_COMPILE_IFELSE([CLOCK_MONOTONIC_SRC],
 	[AC_MSG_RESULT([no])
 	HAVE_CLOCK_MONOTONIC=])
 GIT_CONF_SUBST([HAVE_CLOCK_MONOTONIC])
+
+#
+# Define HAVE_SYNC_FILE_RANGE=YesPlease if sync_file_range is available.
+GIT_CHECK_FUNC(sync_file_range,
+	[HAVE_SYNC_FILE_RANGE=YesPlease],
+	[HAVE_SYNC_FILE_RANGE=])
+GIT_CONF_SUBST([HAVE_SYNC_FILE_RANGE])
+
 #
 # Define NO_SETITIMER if you don't have setitimer.
 GIT_CHECK_FUNC(setitimer,
@@ -1077,14 +1121,6 @@ GIT_CHECK_FUNC(strlcpy,
 [NO_STRLCPY=],
 [NO_STRLCPY=YesPlease])
 GIT_CONF_SUBST([NO_STRLCPY])
-#
-# Define NO_UINTMAX_T if your platform does not have uintmax_t
-AC_CHECK_TYPE(uintmax_t,
-[NO_UINTMAX_T=],
-[NO_UINTMAX_T=YesPlease],[
-#include <inttypes.h>
-])
-GIT_CONF_SUBST([NO_UINTMAX_T])
 #
 # Define NO_STRTOUMAX if you don't have strtoumax in the C library.
 GIT_CHECK_FUNC(strtoumax,
@@ -1151,10 +1187,42 @@ AC_COMPILE_IFELSE([BSD_SYSCTL_SRC],
 	HAVE_BSD_SYSCTL=])
 GIT_CONF_SUBST([HAVE_BSD_SYSCTL])
 
-## Other checks.
-# Define USE_PIC if you need the main git objects to be built with -fPIC
-# in order to build and link perl/Git.so.  x86-64 seems to need this.
 #
+# Define HAVE_SYSINFO=YesPlease if sysinfo is available.
+#
+
+HAVE_SYSINFO=
+# on a *BSD system, sysctl() takes precedence over the
+# sysinfo() compatibility library (if installed).
+
+if test -z "$HAVE_BSD_SYSCTL"; then
+
+  AC_DEFUN([HAVE_SYSINFO_SRC], [
+  AC_LANG_PROGRAM([[
+  #include <stdint.h>
+  #include <sys/sysinfo.h>
+  ]], [[
+  struct sysinfo si;
+  uint64_t t = 0;
+  if (!sysinfo(&si)) {
+	t = si.totalram;
+	if (si.mem_unit > 1)
+		t *= (uint64_t)si.mem_unit;
+  }
+  return t;
+  ]])])
+
+  AC_MSG_CHECKING([for sysinfo])
+  AC_COMPILE_IFELSE([HAVE_SYSINFO_SRC],
+	[AC_MSG_RESULT([yes])
+	HAVE_SYSINFO=YesPlease],
+	[AC_MSG_RESULT([no])
+	HAVE_SYSINFO=])
+  GIT_CONF_SUBST([HAVE_SYSINFO])
+
+fi
+
+## Other checks.
 # Define NO_SYMLINK_HEAD if you never want .git/HEAD to be a symbolic link.
 # Enable it on Windows.  By default, symrefs are still used.
 #

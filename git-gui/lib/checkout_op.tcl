@@ -151,7 +151,7 @@ method _finish_fetch {ok} {
 }
 
 method _update_ref {} {
-	global null_sha1 current_branch repo_config
+	global nullid current_branch repo_config
 
 	set ref $new_ref
 	set new $new_hash
@@ -177,7 +177,7 @@ method _update_ref {} {
 		}
 
 		set reflog_msg "branch: Created from $new_expr"
-		set cur $null_sha1
+		set cur $nullid
 
 		if {($repo_config(branch.autosetupmerge) eq {true}
 			|| $repo_config(branch.autosetupmerge) eq {always})
@@ -304,12 +304,12 @@ The rescan will be automatically started now.
 		_readtree $this
 	} else {
 		ui_status [mc "Refreshing file status..."]
-		set fd [git_read update-index \
+		set fd [git_read [list update-index \
 			-q \
 			--unmerged \
 			--ignore-missing \
 			--refresh \
-			]
+			]]
 		fconfigure $fd -blocking 0 -translation binary
 		fileevent $fd readable [cb _refresh_wait $fd]
 	}
@@ -341,39 +341,41 @@ method _readtree {} {
 	global HEAD
 
 	set readtree_d {}
-	$::main_status start \
+	set status_bar_operation [$::main_status start \
 		[mc "Updating working directory to '%s'..." [_name $this]] \
-		[mc "files checked out"]
+		[mc "files checked out"]]
 
-	set fd [git_read --stderr read-tree \
+	set fd [git_read [list read-tree \
 		-m \
 		-u \
 		-v \
 		--exclude-per-directory=.gitignore \
 		$HEAD \
 		$new_hash \
-		]
+		] \
+		[list 2>@1]]
 	fconfigure $fd -blocking 0 -translation binary
-	fileevent $fd readable [cb _readtree_wait $fd]
+	fileevent $fd readable [cb _readtree_wait $fd $status_bar_operation]
 }
 
-method _readtree_wait {fd} {
+method _readtree_wait {fd status_bar_operation} {
 	global current_branch
 
 	set buf [read $fd]
-	$::main_status update_meter $buf
+	$status_bar_operation update_meter $buf
 	append readtree_d $buf
 
 	fconfigure $fd -blocking 1
 	if {![eof $fd]} {
 		fconfigure $fd -blocking 0
+		$status_bar_operation stop
 		return
 	}
 
 	if {[catch {close $fd}]} {
 		set err $readtree_d
 		regsub {^fatal: } $err {} err
-		$::main_status stop [mc "Aborted checkout of '%s' (file level merging is required)." [_name $this]]
+		$status_bar_operation stop [mc "Aborted checkout of '%s' (file level merging is required)." [_name $this]]
 		warn_popup [strcat [mc "File level merge required."] "
 
 $err
@@ -384,12 +386,12 @@ $err
 		return
 	}
 
-	$::main_status stop
+	$status_bar_operation stop
 	_after_readtree $this
 }
 
 method _after_readtree {} {
-	global selected_commit_type commit_type HEAD MERGE_HEAD PARENT
+	global commit_type HEAD MERGE_HEAD PARENT
 	global current_branch is_detached
 	global ui_comm
 
@@ -460,7 +462,7 @@ If you wanted to be on a branch, create one now starting from 'This Detached Che
 	if {$fd_ph ne {}} {
 		global pch_error
 		set pch_error {}
-		fconfigure $fd_ph -blocking 0 -translation binary -eofchar {}
+		fconfigure $fd_ph -blocking 0 -translation binary
 		fileevent $fd_ph readable [cb _postcheckout_wait $fd_ph]
 	} else {
 		_update_repo_state $this
@@ -490,12 +492,12 @@ method _update_repo_state {} {
 	#    amend mode our file lists are accurate and we can avoid
 	#    the rescan.
 	#
-	global selected_commit_type commit_type HEAD MERGE_HEAD PARENT
+	global commit_type_is_amend commit_type HEAD MERGE_HEAD PARENT
 	global ui_comm
 
 	unlock_index
 	set name [_name $this]
-	set selected_commit_type new
+	set commit_type_is_amend 0
 	if {[string match amend* $commit_type]} {
 		$ui_comm delete 0.0 end
 		$ui_comm edit reset
@@ -509,18 +511,8 @@ method _update_repo_state {} {
 	delete_this
 }
 
-git-version proc _detach_HEAD {log new} {
-	>= 1.5.3 {
-		git update-ref --no-deref -m $log HEAD $new
-	}
-	default {
-		set p [gitdir HEAD]
-		file delete $p
-		set fd [open $p w]
-		fconfigure $fd -translation lf -encoding utf-8
-		puts $fd $new
-		close $fd
-	}
+proc _detach_HEAD {log new} {
+	git update-ref --no-deref -m $log HEAD $new
 }
 
 method _confirm_reset {cur} {
@@ -581,7 +573,7 @@ method _confirm_reset {cur} {
 	pack $w.buttons.cancel -side right -padx 5
 	pack $w.buttons -side bottom -fill x -pady 10 -padx 10
 
-	set fd [git_read rev-list --pretty=oneline $cur ^$new_hash]
+	set fd [git_read [list rev-list --pretty=oneline $cur ^$new_hash]]
 	while {[gets $fd line] > 0} {
 		set abbr [string range $line 0 7]
 		set subj [string range $line 41 end]

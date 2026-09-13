@@ -1,11 +1,18 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "git-compat-util.h"
 #include "parse-options.h"
-#include "cache.h"
+#include "branch.h"
 #include "commit.h"
 #include "color.h"
+#include "date.h"
+#include "environment.h"
+#include "gettext.h"
+#include "object-name.h"
+#include "setup.h"
 #include "string-list.h"
-#include "argv-array.h"
-#include "sha1-array.h"
+#include "strvec.h"
+#include "oid-array.h"
 
 /*----- some often used options -----*/
 
@@ -16,22 +23,17 @@ int parse_opt_abbrev_cb(const struct option *opt, const char *arg, int unset)
 	if (!arg) {
 		v = unset ? 0 : DEFAULT_ABBREV;
 	} else {
+		if (!*arg)
+			return error(_("option `%s' expects a numerical value"),
+				     opt->long_name);
 		v = strtol(arg, (char **)&arg, 10);
 		if (*arg)
-			return opterror(opt, "expects a numerical value", 0);
+			return error(_("option `%s' expects a numerical value"),
+				     opt->long_name);
 		if (v && v < MINIMUM_ABBREV)
 			v = MINIMUM_ABBREV;
-		else if (v > 40)
-			v = 40;
 	}
 	*(int *)(opt->value) = v;
-	return 0;
-}
-
-int parse_opt_approxidate_cb(const struct option *opt, const char *arg,
-			     int unset)
-{
-	*(timestamp_t *)(opt->value) = approxidate(arg);
 	return 0;
 }
 
@@ -48,14 +50,14 @@ int parse_opt_expiry_date_cb(const struct option *opt, const char *arg,
 int parse_opt_color_flag_cb(const struct option *opt, const char *arg,
 			    int unset)
 {
-	int value;
+	enum git_colorbool value;
 
 	if (!arg)
 		arg = unset ? "never" : (const char *)opt->defval;
 	value = git_config_colorbool(NULL, arg);
-	if (value < 0)
-		return opterror(opt,
-			"expects \"always\", \"auto\", or \"never\"", 0);
+	if (value == GIT_COLOR_UNKNOWN)
+		return error(_("option `%s' expects \"always\", \"auto\", or \"never\""),
+			     opt->long_name);
 	*(int *)opt->value = value;
 	return 0;
 }
@@ -64,6 +66,8 @@ int parse_opt_verbosity_cb(const struct option *opt, const char *arg,
 			   int unset)
 {
 	int *target = opt->value;
+
+	BUG_ON_OPT_ARG(arg);
 
 	if (unset)
 		/* --no-quiet, --no-verbose */
@@ -87,14 +91,35 @@ int parse_opt_commits(const struct option *opt, const char *arg, int unset)
 	struct object_id oid;
 	struct commit *commit;
 
+	BUG_ON_OPT_NEG(unset);
+
 	if (!arg)
 		return -1;
-	if (get_oid(arg, &oid))
+	if (repo_get_oid(the_repository, arg, &oid))
 		return error("malformed object name %s", arg);
 	commit = lookup_commit_reference(the_repository, &oid);
 	if (!commit)
 		return error("no such commit %s", arg);
 	commit_list_insert(commit, opt->value);
+	return 0;
+}
+
+int parse_opt_commit(const struct option *opt, const char *arg, int unset)
+{
+	struct object_id oid;
+	struct commit *commit;
+	struct commit **target = opt->value;
+
+	BUG_ON_OPT_NEG(unset);
+
+	if (!arg)
+		return -1;
+	if (repo_get_oid(the_repository, arg, &oid))
+		return error("malformed object name %s", arg);
+	commit = lookup_commit_reference(the_repository, &oid);
+	if (!commit)
+		return error("no such commit %s", arg);
+	*target = commit;
 	return 0;
 }
 
@@ -108,35 +133,65 @@ int parse_opt_object_name(const struct option *opt, const char *arg, int unset)
 	}
 	if (!arg)
 		return -1;
-	if (get_oid(arg, &oid))
+	if (repo_get_oid(the_repository, arg, &oid))
 		return error(_("malformed object name '%s'"), arg);
 	oid_array_append(opt->value, &oid);
+	return 0;
+}
+
+int parse_opt_object_id(const struct option *opt, const char *arg, int unset)
+{
+	struct object_id oid;
+	struct object_id *target = opt->value;
+
+	if (unset) {
+		oidcpy(target, null_oid(the_hash_algo));
+		return 0;
+	}
+	if (!arg)
+		return -1;
+	if (repo_get_oid(the_repository, arg, &oid))
+		return error(_("malformed object name '%s'"), arg);
+	*target = oid;
 	return 0;
 }
 
 int parse_opt_tertiary(const struct option *opt, const char *arg, int unset)
 {
 	int *target = opt->value;
+
+	BUG_ON_OPT_ARG(arg);
+
 	*target = unset ? 2 : 1;
 	return 0;
 }
 
-struct option *parse_options_concat(struct option *a, struct option *b)
+static size_t parse_options_count(const struct option *opt)
+{
+	size_t n = 0;
+
+	for (; opt && opt->type != OPTION_END; opt++)
+		n++;
+	return n;
+}
+
+struct option *parse_options_dup(const struct option *o)
+{
+	struct option no_options[] = { OPT_END() };
+
+	return parse_options_concat(o, no_options);
+}
+
+struct option *parse_options_concat(const struct option *a,
+				    const struct option *b)
 {
 	struct option *ret;
-	size_t i, a_len = 0, b_len = 0;
-
-	for (i = 0; a[i].type != OPTION_END; i++)
-		a_len++;
-	for (i = 0; b[i].type != OPTION_END; i++)
-		b_len++;
+	size_t a_len = parse_options_count(a);
+	size_t b_len = parse_options_count(b);
 
 	ALLOC_ARRAY(ret, st_add3(a_len, b_len, 1));
-	for (i = 0; i < a_len; i++)
-		ret[i] = a[i];
-	for (i = 0; i < b_len; i++)
-		ret[a_len + i] = b[i];
-	ret[a_len + b_len] = b[b_len]; /* final OPTION_END */
+	COPY_ARRAY(ret, a, a_len);
+	COPY_ARRAY(ret + a_len, b, b_len + 1); /* + 1 for final OPTION_END */
 
 	return ret;
 }
@@ -157,21 +212,27 @@ int parse_opt_string_list(const struct option *opt, const char *arg, int unset)
 	return 0;
 }
 
-int parse_opt_noop_cb(const struct option *opt, const char *arg, int unset)
+int parse_opt_strvec(const struct option *opt, const char *arg, int unset)
 {
+	struct strvec *v = opt->value;
+
+	if (unset) {
+		strvec_clear(v);
+		return 0;
+	}
+
+	if (!arg)
+		return -1;
+
+	strvec_push(v, arg);
 	return 0;
 }
 
-/**
- * Report that the option is unknown, so that other code can handle
- * it. This can be used as a callback together with
- * OPTION_LOWLEVEL_CALLBACK to allow an option to be documented in the
- * "-h" output even if it's not being handled directly by
- * parse_options().
- */
-int parse_opt_unknown_cb(const struct option *opt, const char *arg, int unset)
+int parse_opt_noop_cb(const struct option *opt UNUSED,
+		      const char *arg UNUSED,
+		      int unset UNUSED)
 {
-	return -2;
+	return 0;
 }
 
 /**
@@ -224,19 +285,34 @@ int parse_opt_passthru(const struct option *opt, const char *arg, int unset)
 
 /**
  * For an option opt, recreate the command-line option, appending it to
- * opt->value which must be a argv_array. This is useful when we need to pass
+ * opt->value which must be a strvec. This is useful when we need to pass
  * the command-line option, which can be specified multiple times, to another
  * command.
  */
 int parse_opt_passthru_argv(const struct option *opt, const char *arg, int unset)
 {
 	static struct strbuf sb = STRBUF_INIT;
-	struct argv_array *opt_value = opt->value;
+	struct strvec *opt_value = opt->value;
 
 	if (recreate_opt(&sb, opt, arg, unset) < 0)
 		return -1;
 
-	argv_array_push(opt_value, sb.buf);
+	strvec_push(opt_value, sb.buf);
+
+	return 0;
+}
+
+int parse_opt_tracking_mode(const struct option *opt, const char *arg, int unset)
+{
+	if (unset)
+		*(enum branch_track *)opt->value = BRANCH_TRACK_NEVER;
+	else if (!arg || !strcmp(arg, "direct"))
+		*(enum branch_track *)opt->value = BRANCH_TRACK_EXPLICIT;
+	else if (!strcmp(arg, "inherit"))
+		*(enum branch_track *)opt->value = BRANCH_TRACK_INHERIT;
+	else
+		return error(_("option `%s' expects \"%s\" or \"%s\""),
+			     "--track", "direct", "inherit");
 
 	return 0;
 }

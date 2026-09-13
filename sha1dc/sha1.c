@@ -72,7 +72,7 @@
 /* Not under GCC-alike or glibc */
 #elif defined(_BYTE_ORDER) && defined(_BIG_ENDIAN) && defined(_LITTLE_ENDIAN)
 /*
- * *BSD and newlib (embeded linux, cygwin, etc).
+ * *BSD and newlib (embedded linux, cygwin, etc).
  * the defined(_BIG_ENDIAN) && defined(_LITTLE_ENDIAN) part prevents
  * this condition from matching with Solaris/sparc.
  * (Solaris defines only one endian macro)
@@ -88,17 +88,17 @@
 /*
  * Should define Big Endian for a whitelist of known processors. See
  * https://sourceforge.net/p/predef/wiki/Endianness/ and
- * http://www.oracle.com/technetwork/server-storage/solaris/portingtosolaris-138514.html
+ * https://web.archive.org/web/20140421151132/http://www.perforce.com/perforce/doc.current/manuals/p4sag/chapter.superuser.html
  */
 #define SHA1DC_BIGENDIAN
 
 /* Not under GCC-alike or glibc or *BSD or newlib or <processor whitelist> */
-#elif (defined(_AIX))
+#elif (defined(_AIX) || defined(__hpux))
 
 /*
  * Defines Big Endian on a whitelist of OSs that are known to be Big
  * Endian-only. See
- * https://public-inbox.org/git/93056823-2740-d072-1ebd-46b440b33d7e@felt.demon.nl/
+ * https://lore.kernel.org/git/93056823-2740-d072-1ebd-46b440b33d7e@felt.demon.nl/
  */
 #define SHA1DC_BIGENDIAN
 
@@ -124,10 +124,11 @@
 #endif
 /*ENDIANNESS SELECTION*/
 
+#ifndef SHA1DC_FORCE_ALIGNED_ACCESS
 #if defined(SHA1DC_FORCE_UNALIGNED_ACCESS) || defined(SHA1DC_ON_INTEL_LIKE_PROCESSOR)
 #define SHA1DC_ALLOW_UNALIGNED_ACCESS
-#endif /*UNALIGNMENT DETECTION*/
-
+#endif /*UNALIGNED ACCESS DETECTION*/
+#endif /*FORCE ALIGNED ACCESS*/
 
 #define rotate_right(x,n) (((x)>>(n))|((x)<<(32-(n))))
 #define rotate_left(x,n)  (((x)<<(n))|((x)>>(32-(n))))

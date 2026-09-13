@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='check that read-tree rejects confusing paths'
+
 . ./test-lib.sh
 
 test_expect_success 'create base tree' '
@@ -49,6 +50,7 @@ git~1
 .git.SPACE .git.{space}
 .\\\\.GIT\\\\foobar backslashes
 .git\\\\foobar backslashes2
+.git...:alternate-stream
 EOF
 
 test_expect_success 'utf-8 paths allowed with core.protectHFS off' '

@@ -1,11 +1,16 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "builtin.h"
 #include "config.h"
 #include "diff.h"
 #include "commit.h"
+#include "gettext.h"
+#include "hex.h"
 #include "log-tree.h"
-#include "builtin.h"
-#include "submodule.h"
-#include "repository.h"
+#include "read-cache-ll.h"
+#include "revision.h"
+#include "tmp-objdir.h"
+#include "tree.h"
 
 static struct rev_info log_tree_opt;
 
@@ -28,7 +33,7 @@ static int stdin_diff_commit(struct commit *commit, const char *p)
 		struct commit *parent = lookup_commit(the_repository, &oid);
 		if (!pptr) {
 			/* Free the real parent list */
-			free_commit_list(commit->parents);
+			commit_list_free(commit->parents);
 			commit->parents = NULL;
 			pptr = &(commit->parents);
 		}
@@ -47,7 +52,7 @@ static int stdin_diff_trees(struct tree *tree1, const char *p)
 	if (!isspace(*p++) || parse_oid_hex(p, &oid, &p) || *p)
 		return error("Need exactly two trees, separated by a space");
 	tree2 = lookup_tree(the_repository, &oid);
-	if (!tree2 || parse_tree(tree2))
+	if (!tree2 || repo_parse_tree(the_repository, tree2))
 		return -1;
 	printf("%s %s\n", oid_to_hex(&tree1->object.oid),
 			  oid_to_hex(&tree2->object.oid));
@@ -82,13 +87,19 @@ static int diff_tree_stdin(char *line)
 }
 
 static const char diff_tree_usage[] =
-"git diff-tree [--stdin] [-m] [-c] [--cc] [-s] [-v] [--pretty] [-t] [-r] [--root] "
-"[<common-diff-options>] <tree-ish> [<tree-ish>] [<path>...]\n"
+"git diff-tree [--stdin] [-m] [-s] [-v] [--no-commit-id] [--pretty]\n"
+"              [-t] [-r] [-c | --cc] [--combined-all-paths] [--root] [--merge-base]\n"
+"              [<common-diff-options>] <tree-ish> [<tree-ish>] [<path>...]\n"
+"\n"
 "  -r            diff recursively\n"
+"  -c            show combined diff for merge commits\n"
+"  --cc          show combined diff for merge commits removing uninteresting hunks\n"
+"  --combined-all-paths\n"
+"                show name of file in all parents for combined diffs\n"
 "  --root        include the initial commit as diff against /dev/null\n"
 COMMON_DIFF_OPTIONS_HELP;
 
-static void diff_tree_tweak_rev(struct rev_info *rev, struct setup_revision_opt *opt)
+static void diff_tree_tweak_rev(struct rev_info *rev)
 {
 	if (!rev->diffopt.output_format) {
 		if (rev->dense_combined_merges)
@@ -98,20 +109,28 @@ static void diff_tree_tweak_rev(struct rev_info *rev, struct setup_revision_opt 
 	}
 }
 
-int cmd_diff_tree(int argc, const char **argv, const char *prefix)
+int cmd_diff_tree(int argc,
+		  const char **argv,
+		  const char *prefix,
+		  struct repository *repo UNUSED)
 {
 	char line[1000];
 	struct object *tree1, *tree2;
 	static struct rev_info *opt = &log_tree_opt;
 	struct setup_revision_opt s_r_opt;
+	struct userformat_want w;
 	int read_stdin = 0;
+	int merge_base = 0;
 
-	if (argc == 2 && !strcmp(argv[1], "-h"))
-		usage(diff_tree_usage);
+	show_usage_if_asked(argc, argv, diff_tree_usage);
 
-	git_config(git_diff_basic_config, NULL); /* no "diff" UI options */
-	init_revisions(opt, prefix);
-	if (read_cache() < 0)
+	repo_config(the_repository, git_diff_basic_config, NULL); /* no "diff" UI options */
+
+	prepare_repo_settings(the_repository);
+	the_repository->settings.command_requires_full_index = 0;
+
+	repo_init_revisions(the_repository, opt, prefix);
+	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
 	opt->abbrev = 0;
 	opt->diff = 1;
@@ -119,8 +138,16 @@ int cmd_diff_tree(int argc, const char **argv, const char *prefix)
 	memset(&s_r_opt, 0, sizeof(s_r_opt));
 	s_r_opt.tweak = diff_tree_tweak_rev;
 
-	precompose_argv(argc, argv);
+	prefix = precompose_argv_prefix(argc, argv, prefix);
 	argc = setup_revisions(argc, argv, opt, &s_r_opt);
+
+	memset(&w, 0, sizeof(w));
+	userformat_find_requirements(NULL, &w);
+
+	if (!opt->show_notes_given && w.notes)
+		opt->show_notes = 1;
+	if (opt->show_notes)
+		load_display_notes(&opt->notes_opt);
 
 	while (--argc > 0) {
 		const char *arg = *++argv;
@@ -129,8 +156,19 @@ int cmd_diff_tree(int argc, const char **argv, const char *prefix)
 			read_stdin = 1;
 			continue;
 		}
+		if (!strcmp(arg, "--merge-base")) {
+			merge_base = 1;
+			continue;
+		}
 		usage(diff_tree_usage);
 	}
+
+	if (read_stdin && merge_base)
+		die(_("options '%s' and '%s' cannot be used together"), "--stdin", "--merge-base");
+	if (merge_base && opt->pending.nr != 2)
+		die(_("--merge-base only works with two commits"));
+
+	opt->diffopt.rotate_to_strict = 1;
 
 	/*
 	 * NOTE!  We expect "a..b" to expand to "^a b" but it is
@@ -151,7 +189,12 @@ int cmd_diff_tree(int argc, const char **argv, const char *prefix)
 	case 2:
 		tree1 = opt->pending.objects[0].item;
 		tree2 = opt->pending.objects[1].item;
-		if (tree2->flags & UNINTERESTING) {
+		if (merge_base) {
+			struct object_id oid;
+
+			diff_get_merge_base(opt, &oid);
+			tree1 = lookup_object(the_repository, &oid);
+		} else if (tree2->flags & UNINTERESTING) {
 			SWAP(tree2, tree1);
 		}
 		diff_tree_oid(&tree1->oid, &tree2->oid, "", &opt->diffopt);
@@ -163,9 +206,11 @@ int cmd_diff_tree(int argc, const char **argv, const char *prefix)
 		int saved_nrl = 0;
 		int saved_dcctc = 0;
 
+		opt->diffopt.rotate_to_strict = 0;
+		opt->diffopt.no_free = 1;
 		if (opt->diffopt.detect_rename) {
-			if (!the_index.cache)
-				read_index(&the_index);
+			if (the_repository->index->cache)
+				repo_read_index(the_repository);
 			opt->diffopt.setup |= DIFF_SETUP_USE_SIZE_CACHE;
 		}
 		while (fgets(line, sizeof(line), stdin)) {
@@ -185,7 +230,9 @@ int cmd_diff_tree(int argc, const char **argv, const char *prefix)
 		}
 		opt->diffopt.degraded_cc_to_c = saved_dcctc;
 		opt->diffopt.needed_rename_limit = saved_nrl;
+		opt->diffopt.no_free = 0;
+		diff_free(&opt->diffopt);
 	}
 
-	return diff_result_code(&opt->diffopt, 0);
+	return diff_result_code(opt);
 }

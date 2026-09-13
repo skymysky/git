@@ -2,6 +2,7 @@
 
 VERSION_A=.
 VERSION_B=v1.0.0
+MAKE_OPTS_B="NO_OPENSSL=TooOld"
 
 : ${LIB_GIT_DAEMON_PORT:=5500}
 LIB_GIT_DAEMON_COMMAND='git.a daemon'
@@ -37,5 +38,4 @@ test_expect_success "fetch with $VERSION_B" '
 	test_cmp expect actual
 '
 
-stop_git_daemon
 test_done

@@ -4,6 +4,7 @@
 #
 
 test_description='concurrent git svn dcommit'
+
 . ./lib-git-svn.sh
 
 
@@ -45,6 +46,14 @@ setup_hook()
 			"passed to setup_hook" >&2 ; return 1; }
 	echo "cnt=$skip_revs" > "$hook_type-counter"
 	rm -f "$rawsvnrepo/hooks/"*-commit # drop previous hooks
+
+	# Subversion hooks run with an empty environment by default. We thus
+	# need to propagate PATH so that we can find executables.
+	cat >"$rawsvnrepo/conf/hooks-env" <<-EOF
+	[default]
+	PATH = ${PATH}
+	EOF
+
 	hook="$rawsvnrepo/hooks/$hook_type"
 	cat > "$hook" <<- 'EOF1'
 		#!/bin/sh
@@ -62,7 +71,6 @@ EOF1
 	if [ "$hook_type" = "pre-commit" ]; then
 		echo "echo 'commit disallowed' >&2; exit 1" >>"$hook"
 	else
-		echo "PATH=\"$PATH\"; export PATH" >>"$hook"
 		echo "svnconf=\"$svnconf\"" >>"$hook"
 		cat >>"$hook" <<- 'EOF2'
 			cd work-auto-commits.svn
@@ -92,7 +100,7 @@ test_expect_success 'check if post-commit hook creates a concurrent commit' '
 		echo 1 >> file &&
 		svn_cmd commit -m "changing file" &&
 		svn_cmd up &&
-		test_must_fail test_cmp auto_updated_file au_file_saved
+		! test_cmp auto_updated_file au_file_saved
 	)
 '
 
@@ -103,7 +111,7 @@ test_expect_success 'check if pre-commit hook fails' '
 		echo 2 >> file &&
 		svn_cmd commit -m "changing file once again" &&
 		echo 3 >> file &&
-		test_must_fail svn_cmd commit -m "this commit should fail" &&
+		! svn_cmd commit -m "this commit should fail" &&
 		svn_cmd revert file
 	)
 '

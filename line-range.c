@@ -1,7 +1,6 @@
 #include "git-compat-util.h"
 #include "line-range.h"
 #include "xdiff-interface.h"
-#include "strbuf.h"
 #include "userdiff.h"
 
 /*
@@ -135,7 +134,7 @@ static const char *find_funcname_matching_regexp(xdemitconf_t *xecfg, const char
 {
 	int reg_error;
 	regmatch_t match[1];
-	while (1) {
+	while (*start) {
 		const char *bol, *eol;
 		reg_error = regexec(regexp, start, 1, match, 0);
 		if (reg_error == REG_NOMATCH)
@@ -148,8 +147,8 @@ static const char *find_funcname_matching_regexp(xdemitconf_t *xecfg, const char
 		/* determine extent of line matched */
 		bol = start+match[0].rm_so;
 		eol = start+match[0].rm_eo;
-		while (bol > start && *bol != '\n')
-			bol--;
+		while (bol > start && *--bol != '\n')
+			; /* nothing */
 		if (*bol == '\n')
 			bol++;
 		while (*eol && *eol != '\n')
@@ -161,11 +160,13 @@ static const char *find_funcname_matching_regexp(xdemitconf_t *xecfg, const char
 			return bol;
 		start = eol;
 	}
+	return NULL;
 }
 
-static const char *parse_range_funcname(const char *arg, nth_line_fn_t nth_line_cb,
-					void *cb_data, long lines, long anchor, long *begin, long *end,
-					const char *path)
+static const char *parse_range_funcname(
+	const char *arg, nth_line_fn_t nth_line_cb,
+	void *cb_data, long lines, long anchor, long *begin, long *end,
+	const char *path, struct index_state *istate)
 {
 	char *pattern;
 	const char *term;
@@ -198,10 +199,10 @@ static const char *parse_range_funcname(const char *arg, nth_line_fn_t nth_line_
 	anchor--; /* input is in human terms */
 	start = nth_line_cb(cb_data, anchor);
 
-	drv = userdiff_find_by_path(path);
+	drv = userdiff_find_by_path(istate, path);
 	if (drv && drv->funcname.pattern) {
 		const struct userdiff_funcname *pe = &drv->funcname;
-		xecfg = xcalloc(1, sizeof(*xecfg));
+		CALLOC_ARRAY(xecfg, 1);
 		xdiff_set_find_func(xecfg, pe->pattern, pe->cflags);
 	}
 
@@ -233,6 +234,8 @@ static const char *parse_range_funcname(const char *arg, nth_line_fn_t nth_line_
 	}
 
 	regfree(&regexp);
+	if (xecfg)
+		xdiff_clear_find_func(xecfg);
 	free(xecfg);
 	free(pattern);
 
@@ -244,7 +247,8 @@ static const char *parse_range_funcname(const char *arg, nth_line_fn_t nth_line_
 
 int parse_range_arg(const char *arg, nth_line_fn_t nth_line_cb,
 		    void *cb_data, long lines, long anchor,
-		    long *begin, long *end, const char *path)
+		    long *begin, long *end,
+		    const char *path, struct index_state *istate)
 {
 	*begin = *end = 0;
 
@@ -254,7 +258,9 @@ int parse_range_arg(const char *arg, nth_line_fn_t nth_line_cb,
 		anchor = lines + 1;
 
 	if (*arg == ':' || (*arg == '^' && *(arg + 1) == ':')) {
-		arg = parse_range_funcname(arg, nth_line_cb, cb_data, lines, anchor, begin, end, path);
+		arg = parse_range_funcname(arg, nth_line_cb, cb_data,
+					   lines, anchor, begin, end,
+					   path, istate);
 		if (!arg || *arg)
 			return -1;
 		return 0;
@@ -275,10 +281,12 @@ int parse_range_arg(const char *arg, nth_line_fn_t nth_line_cb,
 	return 0;
 }
 
-const char *skip_range_arg(const char *arg)
+const char *skip_range_arg(const char *arg, struct index_state *istate)
 {
 	if (*arg == ':' || (*arg == '^' && *(arg + 1) == ':'))
-		return parse_range_funcname(arg, NULL, NULL, 0, 0, NULL, NULL, NULL);
+		return parse_range_funcname(arg, NULL, NULL,
+					    0, 0, NULL, NULL,
+					    NULL, istate);
 
 	arg = parse_loc(arg, NULL, NULL, 0, -1, NULL);
 

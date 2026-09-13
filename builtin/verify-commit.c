@@ -5,70 +5,56 @@
  *
  * Based on git-verify-tag
  */
-#include "cache.h"
-#include "config.h"
 #include "builtin.h"
-#include "object-store.h"
-#include "repository.h"
+#include "config.h"
+#include "environment.h"
+#include "gettext.h"
+#include "object-name.h"
 #include "commit.h"
-#include "run-command.h"
-#include <signal.h>
 #include "parse-options.h"
 #include "gpg-interface.h"
 
 static const char * const verify_commit_usage[] = {
-		N_("git verify-commit [-v | --verbose] <commit>..."),
+		N_("git verify-commit [-v | --verbose] [--raw] <commit>..."),
 		NULL
 };
 
-static int run_gpg_verify(const struct object_id *oid, const char *buf, unsigned long size, unsigned flags)
+static int run_gpg_verify(struct commit *commit, unsigned flags)
 {
 	struct signature_check signature_check;
 	int ret;
 
 	memset(&signature_check, 0, sizeof(signature_check));
 
-	ret = check_commit_signature(lookup_commit(the_repository, oid),
-				     &signature_check);
+	ret = check_commit_signature(commit, &signature_check);
 	print_signature_buffer(&signature_check, flags);
 
 	signature_check_clear(&signature_check);
 	return ret;
 }
 
-static int verify_commit(const char *name, unsigned flags)
+static int verify_commit(struct repository *repo, const char *name, unsigned flags)
 {
-	enum object_type type;
 	struct object_id oid;
-	char *buf;
-	unsigned long size;
-	int ret;
+	struct object *obj;
 
-	if (get_oid(name, &oid))
+	if (repo_get_oid(repo, name, &oid))
 		return error("commit '%s' not found.", name);
 
-	buf = read_object_file(&oid, &type, &size);
-	if (!buf)
+	obj = parse_object(repo, &oid);
+	if (!obj)
 		return error("%s: unable to read file.", name);
-	if (type != OBJ_COMMIT)
+	if (obj->type != OBJ_COMMIT)
 		return error("%s: cannot verify a non-commit object of type %s.",
-				name, type_name(type));
+				name, type_name(obj->type));
 
-	ret = run_gpg_verify(&oid, buf, size, flags);
-
-	free(buf);
-	return ret;
+	return run_gpg_verify((struct commit *)obj, flags);
 }
 
-static int git_verify_commit_config(const char *var, const char *value, void *cb)
-{
-	int status = git_gpg_config(var, value, cb);
-	if (status)
-		return status;
-	return git_default_config(var, value, cb);
-}
-
-int cmd_verify_commit(int argc, const char **argv, const char *prefix)
+int cmd_verify_commit(int argc,
+		      const char **argv,
+		      const char *prefix,
+		      struct repository *repo)
 {
 	int i = 1, verbose = 0, had_error = 0;
 	unsigned flags = 0;
@@ -78,7 +64,7 @@ int cmd_verify_commit(int argc, const char **argv, const char *prefix)
 		OPT_END()
 	};
 
-	git_config(git_verify_commit_config, NULL);
+	repo_config(repo, git_default_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, verify_commit_options,
 			     verify_commit_usage, PARSE_OPT_KEEP_ARGV0);
@@ -92,7 +78,7 @@ int cmd_verify_commit(int argc, const char **argv, const char *prefix)
 	 * was received in the process of writing the gpg input: */
 	signal(SIGPIPE, SIG_IGN);
 	while (i < argc)
-		if (verify_commit(argv[i++], flags))
+		if (verify_commit(repo, argv[i++], flags))
 			had_error = 1;
 	return had_error;
 }

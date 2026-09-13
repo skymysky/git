@@ -21,7 +21,7 @@ test_expect_success setup '
 	rm -f hello &&
 	mkdir -p hello &&
 	>hello/world &&
-	test "$(git ls-files -o)" = hello/world
+	test "$(git ls-files -o --exclude-standard)" = hello/world
 
 '
 
@@ -33,7 +33,7 @@ test_expect_success 'reset --hard should restore unmerged ones' '
 
 '
 
-test_expect_success 'reset --hard did not corrupt index or cached-tree' '
+test_expect_success 'reset --hard did not corrupt index or cache-tree' '
 
 	T=$(git write-tree) &&
 	rm -f .git/index &&

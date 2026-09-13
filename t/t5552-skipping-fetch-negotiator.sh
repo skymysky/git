@@ -1,7 +1,24 @@
 #!/bin/sh
 
 test_description='test skipping fetch negotiator'
+
 . ./test-lib.sh
+
+test_expect_success 'fetch.negotiationalgorithm config' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	cat >repo/.git/config <<-\EOF &&
+	[fetch]
+	negotiationAlgorithm
+	EOF
+	cat >expect <<-\EOF &&
+	error: missing value for '\''fetch.negotiationalgorithm'\''
+	fatal: bad config variable '\''fetch.negotiationalgorithm'\'' in file '\''.git/config'\'' at line 2
+	EOF
+	test_expect_code 128 git -C repo fetch >out 2>actual &&
+	test_must_be_empty out &&
+	test_cmp expect actual
+'
 
 have_sent () {
 	while test "$#" -ne 0
@@ -48,7 +65,7 @@ test_expect_success 'commits with no parents are sent regardless of skip distanc
 	git init client &&
 	for i in $(test_seq 7)
 	do
-		test_commit -C client c$i
+		test_commit -C client c$i || return 1
 	done &&
 
 	# We send: "c7" (skip 1) "c5" (skip 2) "c2" (skip 4). After that, since
@@ -60,29 +77,6 @@ test_expect_success 'commits with no parents are sent regardless of skip distanc
 	have_not_sent c6 c4 c3
 '
 
-test_expect_success 'unknown fetch.negotiationAlgorithm values error out' '
-	rm -rf server client trace &&
-	git init server &&
-	test_commit -C server to_fetch &&
-
-	git init client &&
-	test_commit -C client on_client &&
-	git -C client checkout on_client &&
-
-	test_config -C client fetch.negotiationAlgorithm invalid &&
-	test_must_fail git -C client fetch "$(pwd)/server" 2>err &&
-	test_i18ngrep "unknown fetch negotiation algorithm" err &&
-
-	# Explicit "default" value
-	test_config -C client fetch.negotiationAlgorithm default &&
-	git -C client -c fetch.negotiationAlgorithm=default fetch "$(pwd)/server" &&
-
-	# Implementation detail: If there is nothing to fetch, we will not error out
-	test_config -C client fetch.negotiationAlgorithm invalid &&
-	git -C client fetch "$(pwd)/server" 2>err &&
-	test_i18ngrep ! "unknown fetch negotiation algorithm" err
-'
-
 test_expect_success 'when two skips collide, favor the larger one' '
 	rm -rf server client trace &&
 	git init server &&
@@ -91,7 +85,7 @@ test_expect_success 'when two skips collide, favor the larger one' '
 	git init client &&
 	for i in $(test_seq 11)
 	do
-		test_commit -C client c$i
+		test_commit -C client c$i || return 1
 	done &&
 	git -C client checkout c5 &&
 	test_commit -C client c5side &&
@@ -123,11 +117,18 @@ test_expect_success 'use ref advertisement to filter out commits' '
 	git -C server checkout --orphan anotherbranch &&
 	test_commit -C server to_fetch &&
 
-	# The server advertising "c3" (as "refs/heads/master") means that we do
+	# The server advertising "c3" (as "refs/heads/main") means that we do
 	# not need to send any ancestors of "c3", but we still need to send "c3"
 	# itself.
 	test_config -C client fetch.negotiationalgorithm skipping &&
-	trace_fetch client origin to_fetch &&
+
+	# The ref advertisement itself is filtered when protocol v2 is used, so
+	# use v0.
+	(
+		GIT_TEST_PROTOCOL_VERSION=0 &&
+		export GIT_TEST_PROTOCOL_VERSION &&
+		trace_fetch client origin to_fetch
+	) &&
 	have_sent c5 c4^ c2side &&
 	have_not_sent c4 c4^^ c4^^^
 '
@@ -171,14 +172,14 @@ test_expect_success 'do not send "have" with ancestors of commits that server AC
 	for i in $(test_seq 8)
 	do
 		git -C client checkout --orphan b$i &&
-		test_commit -C client b$i.c0
+		test_commit -C client b$i.c0 || return 1
 	done &&
 	for j in $(test_seq 19)
 	do
 		for i in $(test_seq 8)
 		do
 			git -C client checkout b$i &&
-			test_commit -C client b$i.c$j
+			test_commit -C client b$i.c$j || return 1
 		done
 	done &&
 
@@ -189,8 +190,18 @@ test_expect_success 'do not send "have" with ancestors of commits that server AC
 	test_commit -C server commit-on-b1 &&
 
 	test_config -C client fetch.negotiationalgorithm skipping &&
-	trace_fetch client "$(pwd)/server" to_fetch &&
-	grep "  fetch" trace &&
+
+	# NEEDSWORK: The number of "have"s sent depends on whether the transport
+	# is stateful. If the overspecification of the result were reduced, this
+	# test could be used for both stateful and stateless transports.
+	(
+		# Force protocol v0, in which local transport is stateful (in
+		# protocol v2 it is stateless).
+		GIT_TEST_PROTOCOL_VERSION=0 &&
+		export GIT_TEST_PROTOCOL_VERSION &&
+		trace_fetch client "$(pwd)/server" to_fetch
+	) &&
+	test_grep "  fetch" trace &&
 
 	# fetch-pack sends 2 requests each containing 16 "have" lines before
 	# processing the first response. In these 2 requests, 4 commits from
@@ -200,14 +211,14 @@ test_expect_success 'do not send "have" with ancestors of commits that server AC
 
 	# While fetch-pack is processing the first response, it should read that
 	# the server ACKs b1.c19 and b1.c17.
-	grep "fetch< ACK $(git -C client rev-parse b1.c19) common" trace &&
-	grep "fetch< ACK $(git -C client rev-parse b1.c17) common" trace &&
+	test_grep "fetch< ACK $(git -C client rev-parse b1.c19) common" trace &&
+	test_grep "fetch< ACK $(git -C client rev-parse b1.c17) common" trace &&
 
 	# fetch-pack should thus not send any more commits in the b1 branch, but
 	# should still send the others (in this test, just check b2).
 	for i in $(test_seq 0 8)
 	do
-		have_not_sent b1.c$i
+		have_not_sent b1.c$i || return 1
 	done &&
 	have_sent b2.c1 b2.c0
 '

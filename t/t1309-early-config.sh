@@ -29,7 +29,7 @@ test_expect_success 'ceiling' '
 		cd sub &&
 		test-tool config read_early_config early.config
 	) >output &&
-	test -z "$(cat output)"
+	test_must_be_empty output
 '
 
 test_expect_success 'ceiling #2' '
@@ -77,7 +77,7 @@ test_with_config () {
 
 test_expect_success 'ignore .git/ with incompatible repository version' '
 	test_with_config "[core]repositoryformatversion = 999999" 2>err &&
-	test_i18ngrep "warning:.* Expected git repo version <= [1-9]" err
+	test_grep "warning:.* Expected git repo version <= [1-9]" err
 '
 
 test_expect_failure 'ignore .git/ with invalid repository version' '
@@ -87,6 +87,16 @@ test_expect_failure 'ignore .git/ with invalid repository version' '
 
 test_expect_failure 'ignore .git/ with invalid config' '
 	test_with_config "["
+'
+
+test_expect_success 'early config and onbranch' '
+	echo "[broken" >broken &&
+	test_with_config "[includeif \"onbranch:topic\"]path=../broken"
+'
+
+test_expect_success 'onbranch config outside of git repo' '
+	test_config_global includeIf.onbranch:topic.path non-existent &&
+	nongit git help
 '
 
 test_done
